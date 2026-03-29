@@ -1,0 +1,20 @@
+# Zig
+.zig-cache/
+zig-out/
+
+# C++ Build Artifacts
+*.o
+*.obj
+*.exe
+*.pdb
+
+# Backups and temporary experiments
+old_crossbuild/
+temp_zig/
+.geminiignore
+
+# Local ROMs
+rom/
+
+# Test SID files
+*.sid

@@ -1,0 +1,6 @@
+[submodule "libsidplayfp"]
+	path = libsidplayfp
+	url = https://github.com/libsidplayfp/libsidplayfp.git
+[submodule "libresidfp"]
+	path = libresidfp
+	url = https://github.com/libsidplayfp/libresidfp.git
