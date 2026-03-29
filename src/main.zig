@@ -1,3 +1,12 @@
+/*
+ * MySidPlayer - A high-fidelity Zig SID player
+ * Copyright (C) 2026 Steinar Barbakken <topguyz@gmail.com>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ */
 const std = @import("std");
 
 const c = @cImport({
@@ -172,3 +181,4 @@ pub fn main() !void {
         std.debug.print("\rTime: {d:0>2}:{d:0>2} | Samples: {d}   ", .{mins, secs, context.sample_count});
     }
 }
+

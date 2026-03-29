@@ -1,3 +1,12 @@
+/*
+ * MySidPlayer - A high-fidelity Zig SID player
+ * Copyright (C) 2026 Steinar Barbakken <topguyz@gmail.com>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ */
 #ifndef SID_WRAPPER_H
 #define SID_WRAPPER_H
 
@@ -46,3 +55,4 @@ unsigned int sid_mix(sidplayfp_t* s, int16_t* buffer, uint32_t samples);
 #endif
 
 #endif
+
