@@ -25,6 +25,7 @@ typedef struct audio_engine_s audio_engine_t;
 typedef void (*audio_callback_t)(int16_t* buffer, uint32_t frameCount, void* pUserData);
 
 audio_engine_t* audio_init(audio_callback_t callback, void* pUserData, int deviceIndex);
+void audio_list_devices(void);
 void audio_start(audio_engine_t* engine);
 void audio_stop(audio_engine_t* engine);
 void audio_deinit(audio_engine_t* engine);

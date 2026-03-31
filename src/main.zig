@@ -1,12 +1,10 @@
-/*
- * MySidPlayer - A high-fidelity Zig SID player
- * Copyright (C) 2026 Steinar Barbakken <topguyz@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- */
+// MySidPlayer - A high-fidelity Zig SID player
+// Copyright (C) 2026 Steinar Barbakken <topguyz@gmail.com>
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
 const std = @import("std");
 
 const c = @cImport({
@@ -81,9 +79,22 @@ fn sid_callback(buffer: [*c]i16, frameCount: u32, pUserData: ?*anyopaque) callco
 }
 
 fn loadRom(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const file = try std.fs.cwd().openFile(path, .{});
+    const file = std.fs.cwd().openFile(path, .{}) catch |err| return err;
     defer file.close();
     return try file.readToEndAlloc(allocator, 1024 * 1024);
+}
+
+fn printUsage(exe_name: []const u8) void {
+    std.debug.print(
+        \\Usage: {s} [options] <sidfile>
+        \\
+        \\Options:
+        \\  -h, --help           Show this help message
+        \\  -l, --list           List available audio devices and exit
+        \\  -d, --device <id>    Select audio device by ID (default: system default)
+        \\  -r, --roms <path>    Path to C64 ROMs directory (default: ./rom)
+        \\
+    , .{exe_name});
 }
 
 pub fn main() !void {
@@ -93,35 +104,77 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    if (args.len < 2) {
-        std.debug.print("Usage: {s} <sidfile> [deviceIndex]\n", .{args[0]});
+    var filename: ?[]const u8 = null;
+    var deviceIndex: i32 = -1;
+    var rom_base: []const u8 = "rom";
+    var list_devices = false;
+
+    var arg_i: usize = 1;
+    while (arg_i < args.len) : (arg_i += 1) {
+        const arg = args[arg_i];
+        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            printUsage(args[0]);
+            return;
+        } else if (std.mem.eql(u8, arg, "-l") or std.mem.eql(u8, arg, "--list")) {
+            list_devices = true;
+        } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--device")) {
+            arg_i += 1;
+            if (arg_i < args.len) {
+                deviceIndex = std.fmt.parseInt(i32, args[arg_i], 10) catch -1;
+            }
+        } else if (std.mem.eql(u8, arg, "-r") or std.mem.eql(u8, arg, "--roms")) {
+            arg_i += 1;
+            if (arg_i < args.len) {
+                rom_base = args[arg_i];
+            }
+        } else if (filename == null) {
+            filename = arg;
+        }
+    }
+
+    if (list_devices) {
+        c.audio_list_devices();
         return;
     }
 
-    const filename = args[1];
-    var deviceIndex: i32 = -1;
-    if (args.len >= 3) {
-        deviceIndex = std.fmt.parseInt(i32, args[2], 10) catch -1;
-    }
+    const sid_file = filename orelse {
+        printUsage(args[0]);
+        return;
+    };
 
     const player = c.sid_new() orelse return error.SidInitFailed;
     defer c.sid_delete(player);
 
-    // Load ROMs
-    const kernal = try loadRom(allocator, "rom/Kernal.rom");
-    defer allocator.free(kernal);
-    const basic = try loadRom(allocator, "rom/Basic.rom");
-    defer allocator.free(basic);
-    const chargen = try loadRom(allocator, "rom/Char.rom");
-    defer allocator.free(chargen);
+    // Load ROMs (Optional)
+    const kernal_path = try std.fs.path.join(allocator, &.{ rom_base, "Kernal.rom" });
+    defer allocator.free(kernal_path);
+    const basic_path = try std.fs.path.join(allocator, &.{ rom_base, "Basic.rom" });
+    defer allocator.free(basic_path);
+    const chargen_path = try std.fs.path.join(allocator, &.{ rom_base, "Char.rom" });
+    defer allocator.free(chargen_path);
 
-    c.sid_set_roms(player, kernal.ptr, basic.ptr, chargen.ptr);
+    const kernal = loadRom(allocator, kernal_path) catch null;
+    defer if (kernal) |k| allocator.free(k);
+    const basic = loadRom(allocator, basic_path) catch null;
+    defer if (basic) |b| allocator.free(b);
+    const chargen = loadRom(allocator, chargen_path) catch null;
+    defer if (chargen) |c_gen| allocator.free(c_gen);
+
+    if (kernal == null or basic == null or chargen == null) {
+        std.debug.print("Warning: C64 ROMs missing in '{s}' folder. RSID files may not play.\n", .{rom_base});
+    }
+
+    c.sid_set_roms(player, 
+        if (kernal) |k| k.ptr else null, 
+        if (basic) |b| b.ptr else null, 
+        if (chargen) |c_gen| c_gen.ptr else null
+    );
 
     const builder = c.builder_new("ReSIDfp");
 
-    const tune = c.tune_new(filename.ptr) orelse return error.TuneLoadFailed;
+    const tune = c.tune_new(sid_file.ptr) orelse return error.TuneLoadFailed;
     if (!c.tune_status(tune)) {
-        std.debug.print("Error: Failed to load tune '{s}'\n", .{filename});
+        std.debug.print("Error: Failed to load tune '{s}'\n", .{sid_file});
         return;
     }
 
@@ -164,7 +217,7 @@ pub fn main() !void {
     const audio = c.audio_init(sid_callback, &context, deviceIndex) orelse return error.AudioInitFailed;
     defer c.audio_deinit(audio);
 
-    std.debug.print("Playing:  {s} ({d} Hz)\n", .{filename, context.clock_speed});
+    std.debug.print("Playing:  {s} ({d} Hz)\n", .{sid_file, context.clock_speed});
     std.debug.print("Control:  Press Ctrl+C to stop.\n\n", .{});
     c.audio_start(audio);
     
