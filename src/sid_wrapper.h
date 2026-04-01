@@ -31,6 +31,7 @@ SidTune_t* tune_new(const char* filename);
 void tune_delete(SidTune_t* t);
 bool tune_status(SidTune_t* t);
 unsigned int tune_select_song(SidTune_t* t, unsigned int songNum);
+const char* tune_md5(SidTune_t* t);
 const char* tune_title(SidTune_t* t);
 const char* tune_author(SidTune_t* t);
 const char* tune_released(SidTune_t* t);
