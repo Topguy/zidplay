@@ -1,17 +1,19 @@
-# MySidPlayer
+# ZidPlayer
 
-A high-fidelity Commodore 64 SID music player built with **Zig** and **libsidplayfp**. It uses the state-of-the-art **reSIDfp** engine for cycle-exact emulation.
+A high-fidelity Commodore 64 SID music player and stem extractor built with **Zig** and **libsidplayfp**. It uses the state-of-the-art **reSIDfp** engine for cycle-exact emulation.
 
 ## Features
-- **Native Windows Build**: Compiled entirely from source using the Zig toolchain.
+- **Native Windows Build**: Compiled entirely from source using the Zig 0.16.0 toolchain.
 - **High Fidelity**: Cycle-accurate SID emulation using `libresidfp`.
 - **Accurate Timing**: Correct PAL/NTSC speed detection.
-- **Low Latency**: Audio output powered by `miniaudio`.
-- **Metadata Support**: Displays Title, Author, and Release info from SID headers.
+- **Interactive TUI**: Live controls for Play/Pause, Next/Prev Song, and Volume.
+- **Advanced Extractor**: Rip individual SID subsongs into perfectly timed, metadata-tagged, 4-channel WAV stems with automatic 5-second silence detection and trimming.
+- **MD5 HVSC Support**: Automatically parses `Songlengths.md5` to display accurate track durations and automate track switching.
 
 ## Prerequisites
-- **Zig 0.15.2** or newer.
+- **Zig 0.16.0**
 - **C64 ROMs**: You need `Kernal.rom`, `Basic.rom`, and `Char.rom`. Place them in a folder named `rom/` in the project root.
+- **Songlengths.md5**: For accurate track lengths, place this file in the project root. (Run `zidplayer --download-lengths` for instructions).
 
 ## Setup & Build
 
@@ -32,9 +34,6 @@ zig run apply_patches.zig
 
 ### 3. Build the Executable
 ```bash
-# For a standard debug build
-zig build
-
 # For an optimized release build
 zig build -Doptimize=ReleaseFast
 ```
@@ -43,15 +42,27 @@ zig build -Doptimize=ReleaseFast
 Run the player from the terminal by providing a `.sid` file:
 
 ```bash
-.\zig-out\bin\mysidplayer.exe path/to/music.sid
+.\zig-out\bin\zidplayer.exe path/to/music.sid
 ```
 
-### Audio Device Selection
-If you have multiple audio outputs, you can list them by running the player and then restart it with a specific device index:
-```bash
-# Example: Use device index 3
-.\zig-out\bin\mysidplayer.exe music.sid 3
+### CLI Options
 ```
+  -h, --help           Show this help message
+  -l, --list           List available audio devices and exit
+  -d, --device <id>    Select audio device by ID (default: system default)
+  -r, --roms <path>    Path to C64 ROMs directory (default: ./rom)
+  --download-lengths   Show instructions to download Songlengths.md5 
+  -t, --track <num>    Extract a specific subsong track (default: starting song)
+  --extract <outfile>  Extract to multi-channel wav
+  --duration <secs>    Extraction duration (overrides MD5 database)
+```
+
+### Interactive Controls
+When playing a track normally in the terminal:
+- `[Space]` Play/Pause
+- `[N / P]` Next/Prev Song
+- `[+ / -]` Adjust Volume
+- `[Q / Esc]` Quit
 
 ## Technical Details
 - **Language**: Zig (main logic and audio callback).
