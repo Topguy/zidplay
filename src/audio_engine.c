@@ -18,6 +18,7 @@ struct audio_engine_s {
     ma_device device;
     audio_callback_t callback;
     void* pUserData;
+    float volume;
     bool contextInitialized;
 };
 
@@ -25,6 +26,14 @@ static void data_callback(ma_device* pDevice, void* pOutput, const void* pInput,
     audio_engine_t* engine = (audio_engine_t*)pDevice->pUserData;
     if (engine && engine->callback) {
         engine->callback((int16_t*)pOutput, frameCount, engine->pUserData);
+        
+        // Apply volume scaling
+        if (engine->volume < 1.0f) {
+            int16_t* samples = (int16_t*)pOutput;
+            for (ma_uint32 i = 0; i < frameCount * 2; i++) {
+                samples[i] = (int16_t)(samples[i] * engine->volume);
+            }
+        }
     }
     (void)pInput;
 }
@@ -39,6 +48,7 @@ audio_engine_t* audio_init(audio_callback_t callback, void* pUserData, int devic
         return NULL;
     }
     engine->contextInitialized = true;
+    engine->volume = 1.0f;
 
     ma_device_info* pPlaybackDeviceInfos;
     ma_uint32 playbackDeviceCount;
@@ -93,6 +103,12 @@ void audio_list_devices(void) {
     }
 
     ma_context_uninit(&context);
+}
+
+void audio_set_volume(audio_engine_t* engine, float volume) {
+    if (engine) {
+        engine->volume = volume < 0.0f ? 0.0f : (volume > 1.0f ? 1.0f : volume);
+    }
 }
 
 void audio_start(audio_engine_t* engine) {

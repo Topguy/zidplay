@@ -18,3 +18,5 @@ rom/
 
 # Test SID files
 *.sid
+*.txt
+Songlengths.md5
