@@ -1,17 +1,18 @@
-/*
- * MySidPlayer - A high-fidelity Zig SID player
- * Copyright (C) 2026 Steinar Barbakken <topguyz@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- */
+// MySidPlayer - A high-fidelity Zig SID player
+// Copyright (C) 2026 Steinar Barbakken <topguyz@gmail.com>
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+
 const std = @import("std");
 
 const c = @cImport({
     @cInclude("sid_wrapper.h");
     @cInclude("audio_engine.h");
+    @cInclude("stdio.h");
+    @cInclude("time.h");
 });
 
 const PlayerContext = struct {
@@ -80,32 +81,63 @@ fn sid_callback(buffer: [*c]i16, frameCount: u32, pUserData: ?*anyopaque) callco
     }
 }
 
-fn loadRom(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    return try file.readToEndAlloc(allocator, 1024 * 1024);
+fn loadRom(allocator: std.mem.Allocator, path: [:0]const u8) ![]u8 {
+    const file = c.fopen(path.ptr, "rb") orelse return error.FileNotFound;
+    defer _ = c.fclose(file);
+    _ = c.fseek(file, 0, c.SEEK_END);
+    const size = @as(usize, @intCast(c.ftell(file)));
+    _ = c.fseek(file, 0, c.SEEK_SET);
+    const buffer = try allocator.alloc(u8, size);
+    _ = c.fread(buffer.ptr, 1, size, file);
+    return buffer;
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
+const WavHeader = extern struct {
+    riff_id: [4]u8 = "RIFF".*,
+    file_size: u32 = 0,
+    wave_id: [4]u8 = "WAVE".*,
+    fmt_id: [4]u8 = "fmt ".*,
+    fmt_size: u32 = 16,
+    audio_format: u16 = 1,
+    num_channels: u16 = 4,
+    sample_rate: u32 = 44100,
+    byte_rate: u32 = 44100 * 4 * 2,
+    block_align: u16 = 4 * 2,
+    bits_per_sample: u16 = 16,
+    data_id: [4]u8 = "data".*,
+    data_size: u32 = 0,
+};
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.arena.allocator();
+    const args = try init.minimal.args.toSlice(allocator);
 
-    if (args.len < 2) {
-        std.debug.print("Usage: {s} <sidfile> [deviceIndex]\n", .{args[0]});
+    var filename: ?[]const u8 = null;
+    var deviceIndex: i32 = -1;
+    var extract_file: ?[:0]const u8 = null;
+    var duration_sec: u32 = 60;
+
+    var arg_idx: usize = 1;
+    while (arg_idx < args.len) : (arg_idx += 1) {
+        if (std.mem.eql(u8, args[arg_idx], "--extract")) {
+            arg_idx += 1;
+            if (arg_idx < args.len) extract_file = args[arg_idx];
+        } else if (std.mem.eql(u8, args[arg_idx], "--duration")) {
+            arg_idx += 1;
+            if (arg_idx < args.len) duration_sec = std.fmt.parseInt(u32, args[arg_idx], 10) catch 60;
+        } else if (filename == null) {
+            filename = args[arg_idx];
+        } else if (deviceIndex == -1) {
+            deviceIndex = std.fmt.parseInt(i32, args[arg_idx], 10) catch -1;
+        }
+    }
+
+    if (filename == null) {
+        std.debug.print("Usage: mysidplayer <sidfile> [deviceIndex] [--extract outfile.wav] [--duration seconds]\n", .{});
         return;
     }
 
-    const filename = args[1];
-    var deviceIndex: i32 = -1;
-    if (args.len >= 3) {
-        deviceIndex = std.fmt.parseInt(i32, args[2], 10) catch -1;
-    }
-
-    const player = c.sid_new() orelse return error.SidInitFailed;
-    defer c.sid_delete(player);
+    const fname = filename.?;
 
     // Load ROMs
     const kernal = try loadRom(allocator, "rom/Kernal.rom");
@@ -115,13 +147,120 @@ pub fn main() !void {
     const chargen = try loadRom(allocator, "rom/Char.rom");
     defer allocator.free(chargen);
 
+    if (extract_file) |outfile| {
+        std.debug.print("Extracting to {s} for {d} seconds...\n", .{outfile, duration_sec});
+        
+        const file = c.fopen(outfile.ptr, "wb") orelse return error.FileCreateFailed;
+        defer _ = c.fclose(file);
+
+        const num_channels: u32 = 4;
+        const sample_rate: u32 = 44100;
+        const total_samples: usize = @as(usize, duration_sec) * sample_rate;
+        const total_frames: usize = total_samples;
+        
+        var header = WavHeader{
+            .num_channels = @intCast(num_channels),
+            .sample_rate = sample_rate,
+            .byte_rate = sample_rate * num_channels * 2,
+            .block_align = @intCast(num_channels * 2),
+            .data_size = @intCast(total_frames * num_channels * 2),
+            .file_size = @intCast(36 + total_frames * num_channels * 2),
+        };
+        
+        _ = c.fwrite(&header, 1, @sizeOf(WavHeader), file);
+
+        var players: [4]*c.sidplayfp_t = undefined;
+        var builders: [4]*c.SIDLiteBuilder_c = undefined;
+        var tunes: [4]*c.SidTune_c = undefined;
+        var contexts: [4]PlayerContext = undefined;
+
+        var i: usize = 0;
+        while (i < 4) : (i += 1) {
+            players[i] = c.sid_new() orelse return error.SidInitFailed;
+            c.sid_set_roms(players[i], kernal.ptr, basic.ptr, chargen.ptr);
+            builders[i] = c.builder_new("ReSIDfp") orelse return error.BuilderInitFailed;
+            tunes[i] = c.tune_new(fname.ptr) orelse return error.TuneLoadFailed;
+            if (!c.tune_status(tunes[i])) {
+                std.debug.print("Error: Failed to load tune '{s}'\n", .{fname});
+                return;
+            }
+            _ = c.tune_select_song(tunes[i], c.tune_start_song(tunes[i])); 
+            if (!c.sid_config(players[i], builders[i], sample_rate)) return error.ConfigFailed;
+            if (!c.sid_load(players[i], tunes[i])) return error.LoadFailed;
+            c.sid_init_mixer(players[i]);
+
+            // Mute logic: We want player `i` to play ONLY voice `i`. So we mute all others.
+            var v: usize = 0;
+            while (v < 4) : (v += 1) {
+                // voice 0-2 are regular voices, voice 3 is samples
+                // enable = false means mute
+                c.sid_mute(players[i], 0, @intCast(v), v != i);
+            }
+
+            contexts[i] = PlayerContext{
+                .player = players[i],
+                .clock_speed = c.tune_get_clock_speed(tunes[i]),
+            };
+        }
+
+        defer {
+            for (players) |p| c.sid_delete(p);
+            for (builders) |b| c.builder_delete(b);
+            for (tunes) |t| c.tune_delete(t);
+        }
+
+        // Loop and write
+        var frames_written: usize = 0;
+        const chunk_size = 4096; // Frames per chunk
+        
+        var mix_bufs: [4][chunk_size * 2]i16 = undefined;
+        var out_buf: [chunk_size * 4]i16 = undefined;
+
+        while (frames_written < total_frames) {
+            const frames_to_write: usize = @min(chunk_size, total_frames - frames_written);
+            
+            // Advance all players
+            for (&contexts, 0..) |*ctx, p_idx| {
+                @memset(&mix_bufs[p_idx], 0);
+                sid_callback(@ptrCast(&mix_bufs[p_idx]), @intCast(frames_to_write), ctx);
+            }
+
+            // Interleave
+            var f: usize = 0;
+            while (f < frames_to_write) : (f += 1) {
+                // mix_bufs contains stereo: L, R, L, R...
+                // we want: v0, v1, v2, v3 for each frame
+                out_buf[f * 4 + 0] = mix_bufs[0][f * 2]; // Player 0 (Voice 0) Left channel
+                out_buf[f * 4 + 1] = mix_bufs[1][f * 2]; // Player 1 (Voice 1) Left channel
+                out_buf[f * 4 + 2] = mix_bufs[2][f * 2]; // Player 2 (Voice 2) Left channel
+                out_buf[f * 4 + 3] = mix_bufs[3][f * 2]; // Player 3 (Voice 3) Left channel
+            }
+
+            _ = c.fwrite(out_buf[0..(frames_to_write * 4)].ptr, 2, frames_to_write * 4, file);
+            frames_written += frames_to_write;
+            
+            if (frames_written % (44100 * 2) < chunk_size) {
+                std.debug.print("\rExtracted {d}/{d} seconds...", .{frames_written / 44100, duration_sec});
+            }
+        }
+        std.debug.print("\nExtraction complete!\n", .{});
+        return;
+    }
+
+    // Normal playback path
+    const player = c.sid_new() orelse return error.SidInitFailed;
+    defer c.sid_delete(player);
+
     c.sid_set_roms(player, kernal.ptr, basic.ptr, chargen.ptr);
 
     const builder = c.builder_new("ReSIDfp");
+    defer c.builder_delete(builder);
 
-    const tune = c.tune_new(filename.ptr) orelse return error.TuneLoadFailed;
+    const tune = c.tune_new(fname.ptr) orelse return error.TuneLoadFailed;
+    defer c.tune_delete(tune);
+
     if (!c.tune_status(tune)) {
-        std.debug.print("Error: Failed to load tune '{s}'\n", .{filename});
+        std.debug.print("Error: Failed to load tune '{s}'\n", .{fname});
         return;
     }
 
@@ -164,21 +303,20 @@ pub fn main() !void {
     const audio = c.audio_init(sid_callback, &context, deviceIndex) orelse return error.AudioInitFailed;
     defer c.audio_deinit(audio);
 
-    std.debug.print("Playing:  {s} ({d} Hz)\n", .{filename, context.clock_speed});
+    std.debug.print("Playing:  {s} ({d} Hz)\n", .{fname, context.clock_speed});
     std.debug.print("Control:  Press Ctrl+C to stop.\n\n", .{});
     c.audio_start(audio);
     
     std.debug.print("Initialization complete. Starting playback...\n", .{});
     
-    const start_time = std.time.timestamp();
+    const start_time = c.time(null);
     
     while (true) {
-        std.Thread.sleep(1 * std.time.ns_per_s);
-        const elapsed = std.time.timestamp() - start_time;
+        try init.io.sleep(.fromMilliseconds(1000), .awake);
+        const elapsed = c.time(null) - start_time;
         const mins = @as(u32, @intCast(@max(0, @divFloor(elapsed, 60))));
         const secs = @as(u32, @intCast(@max(0, @mod(elapsed, 60))));
         
         std.debug.print("\rTime: {d:0>2}:{d:0>2} | Samples: {d}   ", .{mins, secs, context.sample_count});
     }
 }
-

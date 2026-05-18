@@ -49,10 +49,10 @@ void sid_lock(sidplayfp_t* s);
 void sid_unlock(sidplayfp_t* s);
 int sid_play(sidplayfp_t* s, uint32_t cycles);
 unsigned int sid_mix(sidplayfp_t* s, int16_t* buffer, uint32_t samples);
+void sid_mute(sidplayfp_t* s, unsigned int sidNum, unsigned int voice, bool enable);
 
 #ifdef __cplusplus
 }
 #endif
 
 #endif
-

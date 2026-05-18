@@ -10,13 +10,13 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
+            .link_libcpp = true,
         }),
     });
 
     const mod = exe.root_module;
 
-    // Link C++ standard library
-    exe.linkLibCpp();
 
     // Include paths
     mod.addIncludePath(b.path("src"));
@@ -97,10 +97,10 @@ pub fn build(b: *std.Build) void {
     });
 
     // Link Windows system libraries for miniaudio
-    exe.linkSystemLibrary("winmm");
-    exe.linkSystemLibrary("gdi32");
-    exe.linkSystemLibrary("user32");
-    exe.linkSystemLibrary("ole32");
+    exe.root_module.linkSystemLibrary("winmm", .{});
+    exe.root_module.linkSystemLibrary("gdi32", .{});
+    exe.root_module.linkSystemLibrary("user32", .{});
+    exe.root_module.linkSystemLibrary("ole32", .{});
 
     b.installArtifact(exe);
 

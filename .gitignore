@@ -15,6 +15,14 @@ temp_zig/
 
 # Local ROMs
 rom/
+stems/
 
 # Test SID files
 *.sid
+*.wav
+*.mp4
+*.jpg
+*.png
+*.yaml
+
+

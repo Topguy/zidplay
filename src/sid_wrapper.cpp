@@ -147,4 +147,11 @@ unsigned int sid_mix(sidplayfp_t* s, int16_t* buffer, uint32_t samples) {
     return ctx->player.mix(buffer, samples);
 }
 
+void sid_mute(sidplayfp_t* s, unsigned int sidNum, unsigned int voice, bool enable) {
+    sidplayfp_c* ctx = (sidplayfp_c*) s;
+    ctx->mutex.lock();
+    ctx->player.mute(sidNum, voice, enable);
+    ctx->mutex.unlock();
+}
+
 }
