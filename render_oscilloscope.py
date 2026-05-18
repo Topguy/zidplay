@@ -83,7 +83,7 @@ def main():
     config["amplification"] = args.amp
         
     # Custom Retro Colors and remove labels
-    colors = ["#00ffff", "#ff2a6d", "#00ff00", "#ffff00", "#ff8800"]
+    colors = ["#00ffff", "#ff5588", "#00ff00", "#ffff00", "#ff8800"]
     for i, ch in enumerate(config["channels"]):
         ch["line_color"] = colors[i % len(colors)]
         ch["label"] = "" # Blank label to remove redundancy
