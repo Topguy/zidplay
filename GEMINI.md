@@ -8,6 +8,7 @@ We have successfully implemented a **native Windows build** using Zig's internal
 - `src/sid_wrapper.cpp / .h`: C wrapper for the `libsidplayfp` C++ API.
 - `build.zig`: Modern Zig build script that compiles the entire `libsidplayfp` source tree and the player.
 - `libsidplayfp/`: Source code for the library, including required `.bin` blobs (psiddrv, sidplayer1/2).
+- `render_oscilloscope.py`: Python pipeline script to render the extracted `.wav` files into multi-layer oscilloscope `.mp4` videos using `corrscope` and FFmpeg.
 
 ### Build Command:
 ```powershell

@@ -64,6 +64,25 @@ When playing a track normally in the terminal:
 - `[+ / -]` Adjust Volume
 - `[Q / Esc]` Quit
 
+## Oscilloscope Video Rendering
+This repository also contains `render_oscilloscope.py`, a powerful Python utility that converts the multi-channel WAV stems extracted by `zidplayer` into visually stunning retro oscilloscope MP4 videos using `corrscope`.
+
+### Render Features
+- **Auto-Config Generation**: Automatically splits the master WAV into individual channels and generates a customized `yaml` configuration for `corrscope`.
+- **Custom Retro Colors**: Automatically applies bright, neon retro colors to the separate audio channels.
+- **Hardware-Accelerated FX**: Includes a `--fx crt` flag that adds retro CRT scanlines utilizing lightning-fast GPU-accelerated FFmpeg encoders (NVENC/AMF) with CPU fallbacks.
+- **Backgrounds**: Supports placing a custom image behind the waveforms using the `--bg` flag (and dimming it with `--bg-dim`).
+
+### Example Render Pipeline
+1. **Extract the audio**:
+```bash
+.\zig-out\bin\zidplayer.exe Sanxion.sid --extract sanxion.wav -t 1
+```
+2. **Render the video** (with CRT effects and a background):
+```bash
+python render_oscilloscope.py sanxion.wav --out sanxion.mp4 --bg sanxion_bg.jpg --bg-dim 0.4 --fx crt
+```
+
 ## Technical Details
 - **Language**: Zig (main logic and audio callback).
 - **Core**: C++ (`libsidplayfp` and `libresidfp`).
