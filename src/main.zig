@@ -228,6 +228,22 @@ const WavHeader = extern struct {
     data_size: u32 = 0,
 };
 
+fn writeRiffTag(file: *c.FILE, tag: []const u8, value: []const u8) u32 {
+    if (value.len == 0) return 0;
+    _ = c.fwrite(tag.ptr, 1, 4, file);
+    const size_with_null = @as(u32, @intCast(value.len + 1));
+    _ = c.fwrite(&size_with_null, 4, 1, file);
+    _ = c.fwrite(value.ptr, 1, value.len, file);
+    const zero: u8 = 0;
+    _ = c.fwrite(&zero, 1, 1, file);
+    var total_written: u32 = 4 + 4 + size_with_null;
+    if (size_with_null % 2 != 0) {
+        _ = c.fwrite(&zero, 1, 1, file);
+        total_written += 1;
+    }
+    return total_written;
+}
+
 fn printUsage(exe_name: []const u8) void {
     std.debug.print(
         \\Usage: {s} [options] <sidfile>
@@ -251,7 +267,8 @@ pub fn main(init: std.process.Init) !void {
     var filename: ?[]const u8 = null;
     var deviceIndex: i32 = -1;
     var extract_file: ?[:0]const u8 = null;
-    var duration_sec: u32 = 60;
+    var duration_sec: ?u32 = null;
+    var track_arg: ?u32 = null;
     var rom_base: []const u8 = "rom";
     var list_devices = false;
     var download_lengths = false;
@@ -279,9 +296,12 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--extract")) {
             arg_i += 1;
             if (arg_i < args.len) extract_file = @ptrCast(args[arg_i]);
+        } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--track")) {
+            arg_i += 1;
+            if (arg_i < args.len) track_arg = std.fmt.parseInt(u32, args[arg_i], 10) catch null;
         } else if (std.mem.eql(u8, arg, "--duration")) {
             arg_i += 1;
-            if (arg_i < args.len) duration_sec = std.fmt.parseInt(u32, args[arg_i], 10) catch 60;
+            if (arg_i < args.len) duration_sec = std.fmt.parseInt(u32, args[arg_i], 10) catch null;
         } else if (filename == null) {
             filename = arg;
         }
@@ -321,15 +341,89 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("Warning: C64 ROMs missing in '{s}' folder. RSID files may not play.\n", .{rom_base});
     }
 
+    // Calculate MD5s and parse lengths EARLY
+    var song_lengths: []u32 = &.{};
+    var used_md5: []const u8 = "";
+    var hl_str_buf: [32]u8 = undefined;
+    var full_str_buf: [32]u8 = undefined;
+    {
+        var sid_data: []u8 = undefined;
+        const path_z = try allocator.dupeZ(u8, sid_file);
+        defer allocator.free(path_z);
+        if (c.fopen(path_z.ptr, "rb")) |f| {
+            _ = c.fseek(f, 0, c.SEEK_END);
+            const size = @as(usize, @intCast(c.ftell(f)));
+            _ = c.fseek(f, 0, c.SEEK_SET);
+            sid_data = try allocator.alloc(u8, size);
+            _ = c.fread(sid_data.ptr, 1, size, f);
+            _ = c.fclose(f);
+            
+            var md5_full_buf: [16]u8 = undefined;
+            Md5.hash(sid_data, &md5_full_buf, .{});
+            
+            var md5_headerless_buf: [16]u8 = undefined;
+            if (sid_data.len > 124) {
+                Md5.hash(sid_data[124..], &md5_headerless_buf, .{});
+            } else {
+                @memcpy(&md5_headerless_buf, &md5_full_buf);
+            }
+            
+            for (md5_full_buf, 0..) |b, j| {
+                _ = std.fmt.bufPrint(full_str_buf[j * 2 .. j * 2 + 2], "{x:0>2}", .{b}) catch unreachable;
+            }
+            for (md5_headerless_buf, 0..) |b, j| {
+                _ = std.fmt.bufPrint(hl_str_buf[j * 2 .. j * 2 + 2], "{x:0>2}", .{b}) catch unreachable;
+            }
+            
+            song_lengths = parseSongLengths(allocator, &hl_str_buf) catch &.{};
+            used_md5 = &hl_str_buf;
+            if (song_lengths.len == 0) {
+                song_lengths = parseSongLengths(allocator, &full_str_buf) catch &.{};
+                used_md5 = &full_str_buf;
+            }
+            allocator.free(sid_data);
+        }
+    }
+    defer allocator.free(song_lengths);
+
     if (extract_file) |outfile| {
-        std.debug.print("Extracting to {s} for {d} seconds...\n", .{outfile, duration_sec});
+        const tmp_tune = c.tune_new(sid_file.ptr) orelse return error.TuneLoadFailed;
+        const start_song = if (track_arg) |t| t else c.tune_start_song(tmp_tune);
+        
+        // Save metadata strings
+        const title = c.tune_info_string(tmp_tune, 0);
+        const author = c.tune_info_string(tmp_tune, 1);
+        const released = c.tune_info_string(tmp_tune, 2);
+        
+        var title_str: []const u8 = "";
+        var author_str: []const u8 = "";
+        var released_str: []const u8 = "";
+        
+        if (title != null) title_str = std.mem.span(title);
+        if (author != null) author_str = std.mem.span(author);
+        if (released != null) released_str = std.mem.span(released);
+
+        c.tune_delete(tmp_tune);
+        
+        if (duration_sec == null and start_song > 0 and start_song <= song_lengths.len) {
+            const length = song_lengths[start_song - 1];
+            if (length > 0) duration_sec = length;
+        }
+
+        if (duration_sec == null) {
+            std.debug.print("Error: No duration given and track length not found in database.\nUse --duration <secs> to specify extraction length.\n", .{});
+            return;
+        }
+
+        const exact_duration = duration_sec.?;
+        std.debug.print("Extracting track {d} to {s} (max {d} seconds)...\n", .{start_song, outfile, exact_duration});
         
         const file = c.fopen(outfile.ptr, "wb") orelse return error.FileCreateFailed;
         defer _ = c.fclose(file);
 
         const num_channels: u32 = 4;
         const sample_rate: u32 = 44100;
-        const total_samples: usize = @as(usize, duration_sec) * sample_rate;
+        const total_samples: usize = @as(usize, exact_duration) * sample_rate;
         const total_frames: usize = total_samples;
         
         var header = WavHeader{
@@ -358,20 +452,13 @@ pub fn main(init: std.process.Init) !void {
             );
             builders[i] = c.builder_new("ReSIDfp") orelse return error.BuilderInitFailed;
             tunes[i] = c.tune_new(sid_file.ptr) orelse return error.TuneLoadFailed;
-            if (!c.tune_status(tunes[i])) {
-                std.debug.print("Error: Failed to load tune '{s}'\n", .{sid_file});
-                return;
-            }
-            _ = c.tune_select_song(tunes[i], c.tune_start_song(tunes[i])); 
+            _ = c.tune_select_song(tunes[i], start_song); 
             if (!c.sid_config(players[i], builders[i], sample_rate)) return error.ConfigFailed;
             if (!c.sid_load(players[i], tunes[i])) return error.LoadFailed;
             c.sid_init_mixer(players[i]);
 
-            // Mute logic: We want player `i` to play ONLY voice `i`. So we mute all others.
             var v: usize = 0;
             while (v < 4) : (v += 1) {
-                // voice 0-2 are regular voices, voice 3 is samples
-                // enable = false means mute
                 c.sid_mute(players[i], 0, @intCast(v), v != i);
             }
 
@@ -388,9 +475,8 @@ pub fn main(init: std.process.Init) !void {
             for (tunes) |t| c.tune_delete(t);
         }
 
-        // Loop and write
         var frames_written: usize = 0;
-        const chunk_size = 4096; // Frames per chunk
+        const chunk_size = 4096;
         
         var mix_bufs: [4][chunk_size * 2]i16 = undefined;
         var out_buf: [chunk_size * 4]i16 = undefined;
@@ -398,28 +484,63 @@ pub fn main(init: std.process.Init) !void {
         while (frames_written < total_frames) {
             const frames_to_write: usize = @min(chunk_size, total_frames - frames_written);
             
-            // Advance all players
             for (&contexts, 0..) |*ctx, p_idx| {
                 @memset(&mix_bufs[p_idx], 0);
                 sid_callback(@ptrCast(&mix_bufs[p_idx]), @intCast(frames_to_write), ctx);
             }
 
-            // Interleave
             var f: usize = 0;
             while (f < frames_to_write) : (f += 1) {
-                out_buf[f * 4 + 0] = mix_bufs[0][f * 2]; // Player 0 (Voice 0) Left channel
-                out_buf[f * 4 + 1] = mix_bufs[1][f * 2]; // Player 1 (Voice 1) Left channel
-                out_buf[f * 4 + 2] = mix_bufs[2][f * 2]; // Player 2 (Voice 2) Left channel
-                out_buf[f * 4 + 3] = mix_bufs[3][f * 2]; // Player 3 (Voice 3) Left channel
+                out_buf[f * 4 + 0] = mix_bufs[0][f * 2];
+                out_buf[f * 4 + 1] = mix_bufs[1][f * 2];
+                out_buf[f * 4 + 2] = mix_bufs[2][f * 2];
+                out_buf[f * 4 + 3] = mix_bufs[3][f * 2];
             }
 
             _ = c.fwrite(out_buf[0..(frames_to_write * 4)].ptr, 2, frames_to_write * 4, file);
             frames_written += frames_to_write;
             
+            var all_silent = true;
+            for (&contexts) |*ctx| {
+                if (ctx.silent_frames < 44100 * 5) {
+                    all_silent = false;
+                    break;
+                }
+            }
+            if (all_silent) {
+                std.debug.print("\nExtraction stopped early (5 seconds of silence detected).\n", .{});
+                break;
+            }
+            
             if (frames_written % (44100 * 2) < chunk_size) {
-                std.debug.print("\rExtracted {d}/{d} seconds...", .{frames_written / 44100, duration_sec});
+                std.debug.print("\rExtracted {d}/{d} seconds...", .{frames_written / 44100, exact_duration});
             }
         }
+        
+        var list_size: u32 = 4;
+        var has_tags = false;
+        if (title_str.len > 0) { list_size += @as(u32, @intCast(8 + title_str.len + 1 + (if ((title_str.len + 1) % 2 != 0) @as(u32, 1) else 0))); has_tags = true; }
+        if (author_str.len > 0) { list_size += @as(u32, @intCast(8 + author_str.len + 1 + (if ((author_str.len + 1) % 2 != 0) @as(u32, 1) else 0))); has_tags = true; }
+        if (released_str.len > 0) { list_size += @as(u32, @intCast(8 + released_str.len + 1 + (if ((released_str.len + 1) % 2 != 0) @as(u32, 1) else 0))); has_tags = true; }
+        
+        if (has_tags) {
+            _ = c.fwrite("LIST", 1, 4, file);
+            _ = c.fwrite(&list_size, 4, 1, file);
+            _ = c.fwrite("INFO", 1, 4, file);
+            _ = writeRiffTag(file, "INAM", title_str);
+            _ = writeRiffTag(file, "IART", author_str);
+            _ = writeRiffTag(file, "ICRD", released_str);
+        }
+        
+        const final_data_size = @as(u32, @intCast(frames_written * num_channels * 2));
+        const final_file_size = 36 + final_data_size + if (has_tags) (8 + list_size) else 0;
+        
+        header.data_size = final_data_size;
+        header.file_size = final_file_size;
+        
+        _ = c.fseek(file, 0, c.SEEK_SET);
+        _ = c.fwrite(&header, 1, @sizeOf(WavHeader), file);
+        
         std.debug.print("\nExtraction complete!\n", .{});
         return;
     }
@@ -474,53 +595,6 @@ pub fn main(init: std.process.Init) !void {
     }
 
     c.sid_init_mixer(player);
-    
-    // Calculate MD5s for HVSC compatibility
-    var sid_data: []u8 = undefined;
-    {
-        const path_z = try allocator.dupeZ(u8, sid_file);
-        defer allocator.free(path_z);
-        const file = c.fopen(path_z.ptr, "rb") orelse return error.FileNotFound;
-        defer _ = c.fclose(file);
-        _ = c.fseek(file, 0, c.SEEK_END);
-        const size = @as(usize, @intCast(c.ftell(file)));
-        _ = c.fseek(file, 0, c.SEEK_SET);
-        sid_data = try allocator.alloc(u8, size);
-        _ = c.fread(sid_data.ptr, 1, size, file);
-    }
-    defer allocator.free(sid_data);
-    
-    var md5_full_buf: [16]u8 = undefined;
-    Md5.hash(sid_data, &md5_full_buf, .{});
-    
-    var md5_headerless_buf: [16]u8 = undefined;
-    if (sid_data.len > 124) {
-        Md5.hash(sid_data[124..], &md5_headerless_buf, .{});
-    } else {
-        @memcpy(&md5_headerless_buf, &md5_full_buf);
-    }
-    
-    var full_str_buf: [32]u8 = undefined;
-    var hl_str_buf: [32]u8 = undefined;
-    
-    for (md5_full_buf, 0..) |b, j| {
-        _ = std.fmt.bufPrint(full_str_buf[j * 2 .. j * 2 + 2], "{x:0>2}", .{b}) catch unreachable;
-    }
-    for (md5_headerless_buf, 0..) |b, j| {
-        _ = std.fmt.bufPrint(hl_str_buf[j * 2 .. j * 2 + 2], "{x:0>2}", .{b}) catch unreachable;
-    }
-
-    const hl_str = &hl_str_buf;
-    const full_str = &full_str_buf;
-
-    // Try headerless first, then full-file
-    var song_lengths = parseSongLengths(allocator, hl_str) catch &.{};
-    var used_md5 = hl_str;
-    if (song_lengths.len == 0) {
-        song_lengths = parseSongLengths(allocator, full_str) catch &.{};
-        used_md5 = full_str;
-    }
-    defer allocator.free(song_lengths);
 
     var context = PlayerContext{ 
         .player = player,
