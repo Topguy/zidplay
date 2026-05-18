@@ -55,6 +55,10 @@ unsigned int tune_select_song(SidTune_t* t, unsigned int songNum) {
     return ((SidTune*) t)->selectSong(songNum);
 }
 
+const char* tune_md5(SidTune_t* t) {
+    return ((SidTune*) t)->createMD5New();
+}
+
 const char* tune_title(SidTune_t* t) {
     return ((SidTune*) t)->getInfo()->infoString(0);
 }

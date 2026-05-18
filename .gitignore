@@ -24,5 +24,6 @@ stems/
 *.jpg
 *.png
 *.yaml
-
+*.txt
+Songlengths.md5
 

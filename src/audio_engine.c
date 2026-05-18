@@ -18,6 +18,7 @@ struct audio_engine_s {
     ma_device device;
     audio_callback_t callback;
     void* pUserData;
+    float volume;
     bool contextInitialized;
 };
 
@@ -25,6 +26,14 @@ static void data_callback(ma_device* pDevice, void* pOutput, const void* pInput,
     audio_engine_t* engine = (audio_engine_t*)pDevice->pUserData;
     if (engine && engine->callback) {
         engine->callback((int16_t*)pOutput, frameCount, engine->pUserData);
+        
+        // Apply volume scaling
+        if (engine->volume < 1.0f) {
+            int16_t* samples = (int16_t*)pOutput;
+            for (ma_uint32 i = 0; i < frameCount * 2; i++) {
+                samples[i] = (int16_t)(samples[i] * engine->volume);
+            }
+        }
     }
     (void)pInput;
 }
@@ -39,6 +48,7 @@ audio_engine_t* audio_init(audio_callback_t callback, void* pUserData, int devic
         return NULL;
     }
     engine->contextInitialized = true;
+    engine->volume = 1.0f;
 
     ma_device_info* pPlaybackDeviceInfos;
     ma_uint32 playbackDeviceCount;
@@ -49,11 +59,6 @@ audio_engine_t* audio_init(audio_callback_t callback, void* pUserData, int devic
         return NULL;
     }
 
-    printf("Available playback devices:\n");
-    for (ma_uint32 i = 0; i < playbackDeviceCount; i++) {
-        printf("  [%u] %s %s\n", i, pPlaybackDeviceInfos[i].name, pPlaybackDeviceInfos[i].isDefault ? "(Default)" : "");
-    }
-
     engine->callback = callback;
     engine->pUserData = pUserData;
 
@@ -62,9 +67,6 @@ audio_engine_t* audio_init(audio_callback_t callback, void* pUserData, int devic
     
     if (deviceIndex >= 0 && (ma_uint32)deviceIndex < playbackDeviceCount) {
         deviceConfig.playback.pDeviceID = &pPlaybackDeviceInfos[deviceIndex].id;
-        printf("Selecting device [%d]: %s\n", deviceIndex, pPlaybackDeviceInfos[deviceIndex].name);
-    } else {
-        printf("Using default playback device.\n");
     }
 
     deviceConfig.playback.format   = ma_format_s16;
@@ -80,6 +82,33 @@ audio_engine_t* audio_init(audio_callback_t callback, void* pUserData, int devic
     }
 
     return engine;
+}
+
+void audio_list_devices(void) {
+    ma_context context;
+    if (ma_context_init(NULL, 0, NULL, &context) != MA_SUCCESS) {
+        printf("Failed to initialize audio context for device listing.\n");
+        return;
+    }
+
+    ma_device_info* pPlaybackDeviceInfos;
+    ma_uint32 playbackDeviceCount;
+    if (ma_context_get_devices(&context, &pPlaybackDeviceInfos, &playbackDeviceCount, NULL, NULL) == MA_SUCCESS) {
+        printf("Available playback devices:\n");
+        for (ma_uint32 i = 0; i < playbackDeviceCount; i++) {
+            printf("  [%u] %s %s\n", i, pPlaybackDeviceInfos[i].name, pPlaybackDeviceInfos[i].isDefault ? "(Default)" : "");
+        }
+    } else {
+        printf("Failed to get audio devices.\n");
+    }
+
+    ma_context_uninit(&context);
+}
+
+void audio_set_volume(audio_engine_t* engine, float volume) {
+    if (engine) {
+        engine->volume = volume < 0.0f ? 0.0f : (volume > 1.0f ? 1.0f : volume);
+    }
 }
 
 void audio_start(audio_engine_t* engine) {

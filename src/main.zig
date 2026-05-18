@@ -7,29 +7,133 @@
 // (at your option) any later version.
 
 const std = @import("std");
+const Md5 = std.crypto.hash.Md5;
 
 const c = @cImport({
     @cInclude("sid_wrapper.h");
     @cInclude("audio_engine.h");
     @cInclude("stdio.h");
     @cInclude("time.h");
+    @cDefine("WIN32_LEAN_AND_MEAN", "");
+    @cInclude("windows.h");
 });
+
+const VK_SPACE = 0x20;
+const VK_ADD = 0x6B;
+const VK_SUBTRACT = 0x6D;
+const VK_OEM_PLUS = 0xBB;
+const VK_OEM_MINUS = 0xBD;
+const VK_P = 0x50;
+const VK_N = 0x4E;
+const VK_Q = 0x51;
+const VK_ESCAPE = 0x1B;
 
 const PlayerContext = struct {
     player: *c.sidplayfp_t,
+    tune: *c.SidTune_t,
     sample_count: usize = 0,
     clock_speed: u32 = 985248,
+    is_paused: bool = false,
+    volume: f32 = 1.0,
+    current_song: u32 = 0,
+    total_songs: u32 = 0,
+    song_lengths: []const u32 = &.{}, // Lengths in seconds for each sub-song
+    silent_frames: u32 = 0,
     
     // Leftover buffer handling
     leftover_buf: [16384]i16 = undefined,
     leftover_count: u32 = 0,
 };
 
+fn printDownloadInstructions() void {
+    const url = "https://www.hvsc.c64.org/download/C64Music/DOCUMENTS/Songlengths.md5";
+    std.debug.print(
+        \\
+        \\To enable song length detection and auto-next:
+        \\1. Download the MD5 database from: {s}
+        \\2. Place the 'Songlengths.md5' file in the same folder as this executable.
+        \\
+    , .{url});
+}
+
+fn parseSongLengths(allocator: std.mem.Allocator, md5: []const u8) ![]u32 {
+    const file = c.fopen("Songlengths.md5", "rb") orelse return try allocator.alloc(u32, 0);
+    _ = c.fseek(file, 0, c.SEEK_END);
+    const size = @as(usize, @intCast(c.ftell(file)));
+    _ = c.fseek(file, 0, c.SEEK_SET);
+    if (size > 10 * 1024 * 1024) {
+        _ = c.fclose(file);
+        return try allocator.alloc(u32, 0);
+    }
+    const data = try allocator.alloc(u8, size);
+    _ = c.fread(data.ptr, 1, size, file);
+    _ = c.fclose(file);
+    defer allocator.free(data);
+
+    var it = std.mem.splitSequence(u8, data, "\n");
+    while (it.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, "\r ");
+        if (line.len < 33 or line[0] == ';' or line[0] == '[') continue;
+        
+        const eq_idx = std.mem.indexOf(u8, line, "=") orelse continue;
+        const line_md5 = line[0..eq_idx];
+        
+        if (std.mem.eql(u8, line_md5, md5)) {
+            const times_part = line[eq_idx + 1 ..];
+            var time_it = std.mem.splitScalar(u8, times_part, ' ');
+            
+            var tmp_lengths: [256]u32 = undefined;
+            var count: usize = 0;
+            
+            while (time_it.next()) |time_str| {
+                const t = std.mem.trim(u8, time_str, " ");
+                if (t.len < 3) continue;
+                var part_it = std.mem.splitScalar(u8, t, ':');
+                const mins_str = part_it.next() orelse continue;
+                const secs_str = part_it.next() orelse continue;
+                
+                const mins = std.fmt.parseInt(u32, mins_str, 10) catch continue;
+                const secs = std.fmt.parseInt(u32, secs_str, 10) catch continue;
+                if (count < tmp_lengths.len) {
+                    tmp_lengths[count] = mins * 60 + secs;
+                    count += 1;
+                }
+            }
+            const result = try allocator.alloc(u32, count);
+            @memcpy(result, tmp_lengths[0..count]);
+            return result;
+        }
+    }
+    return try allocator.alloc(u32, 0);
+}
+
+fn switchSong(context: *PlayerContext, songNum: u32, track_start_time: *i64) void {
+    if (songNum < 1 or songNum > context.total_songs) return;
+
+    c.sid_lock(context.player);
+    defer c.sid_unlock(context.player);
+
+    _ = c.tune_select_song(context.tune, songNum);
+    _ = c.sid_load(context.player, context.tune);
+    c.sid_init_mixer(context.player);
+
+    context.current_song = songNum;
+    context.clock_speed = c.tune_get_clock_speed(context.tune);
+    context.leftover_count = 0;
+    context.silent_frames = 0;
+    track_start_time.* = c.time(null);
+}
+
 fn sid_callback(buffer: [*c]i16, frameCount: u32, pUserData: ?*anyopaque) callconv(.c) void {
     const ctx: *PlayerContext = @ptrCast(@alignCast(pUserData));
     
     c.sid_lock(ctx.player);
     defer c.sid_unlock(ctx.player);
+
+    if (ctx.is_paused) {
+        @memset(buffer[0..(frameCount * 2)], 0);
+        return;
+    }
 
     var frames_done: u32 = 0;
     var out_ptr = buffer;
@@ -79,10 +183,26 @@ fn sid_callback(buffer: [*c]i16, frameCount: u32, pUserData: ?*anyopaque) callco
             break;
         }
     }
+
+    // Silence detection (Check after mixing with low threshold)
+    var is_silent = true;
+    for (0..(frameCount * 2)) |i| {
+        if (buffer[i] > 100 or buffer[i] < -100) {
+            is_silent = false;
+            break;
+        }
+    }
+    if (is_silent) {
+        ctx.silent_frames += frameCount;
+    } else {
+        ctx.silent_frames = 0;
+    }
 }
 
-fn loadRom(allocator: std.mem.Allocator, path: [:0]const u8) ![]u8 {
-    const file = c.fopen(path.ptr, "rb") orelse return error.FileNotFound;
+fn loadRom(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+    const file = c.fopen(path_z.ptr, "rb") orelse return error.FileNotFound;
     defer _ = c.fclose(file);
     _ = c.fseek(file, 0, c.SEEK_END);
     const size = @as(usize, @intCast(c.ftell(file)));
@@ -108,6 +228,22 @@ const WavHeader = extern struct {
     data_size: u32 = 0,
 };
 
+fn printUsage(exe_name: []const u8) void {
+    std.debug.print(
+        \\Usage: {s} [options] <sidfile>
+        \\
+        \\Options:
+        \\  -h, --help           Show this help message
+        \\  -l, --list           List available audio devices and exit
+        \\  -d, --device <id>    Select audio device by ID (default: system default)
+        \\  -r, --roms <path>    Path to C64 ROMs directory (default: ./rom)
+        \\  --download-lengths   Show instructions to download Songlengths.md5 
+        \\  --extract <outfile>  Extract to multi-channel wav
+        \\  --duration <secs>    Extraction duration
+        \\
+    , .{exe_name});
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
@@ -116,36 +252,74 @@ pub fn main(init: std.process.Init) !void {
     var deviceIndex: i32 = -1;
     var extract_file: ?[:0]const u8 = null;
     var duration_sec: u32 = 60;
+    var rom_base: []const u8 = "rom";
+    var list_devices = false;
+    var download_lengths = false;
 
-    var arg_idx: usize = 1;
-    while (arg_idx < args.len) : (arg_idx += 1) {
-        if (std.mem.eql(u8, args[arg_idx], "--extract")) {
-            arg_idx += 1;
-            if (arg_idx < args.len) extract_file = args[arg_idx];
-        } else if (std.mem.eql(u8, args[arg_idx], "--duration")) {
-            arg_idx += 1;
-            if (arg_idx < args.len) duration_sec = std.fmt.parseInt(u32, args[arg_idx], 10) catch 60;
+    var arg_i: usize = 1;
+    while (arg_i < args.len) : (arg_i += 1) {
+        const arg = args[arg_i];
+        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            printUsage(args[0]);
+            return;
+        } else if (std.mem.eql(u8, arg, "-l") or std.mem.eql(u8, arg, "--list")) {
+            list_devices = true;
+        } else if (std.mem.eql(u8, arg, "--download-lengths")) {
+            download_lengths = true;
+        } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--device")) {
+            arg_i += 1;
+            if (arg_i < args.len) {
+                deviceIndex = std.fmt.parseInt(i32, args[arg_i], 10) catch -1;
+            }
+        } else if (std.mem.eql(u8, arg, "-r") or std.mem.eql(u8, arg, "--roms")) {
+            arg_i += 1;
+            if (arg_i < args.len) {
+                rom_base = args[arg_i];
+            }
+        } else if (std.mem.eql(u8, arg, "--extract")) {
+            arg_i += 1;
+            if (arg_i < args.len) extract_file = @ptrCast(args[arg_i]);
+        } else if (std.mem.eql(u8, arg, "--duration")) {
+            arg_i += 1;
+            if (arg_i < args.len) duration_sec = std.fmt.parseInt(u32, args[arg_i], 10) catch 60;
         } else if (filename == null) {
-            filename = args[arg_idx];
-        } else if (deviceIndex == -1) {
-            deviceIndex = std.fmt.parseInt(i32, args[arg_idx], 10) catch -1;
+            filename = arg;
         }
     }
 
-    if (filename == null) {
-        std.debug.print("Usage: mysidplayer <sidfile> [deviceIndex] [--extract outfile.wav] [--duration seconds]\n", .{});
+    if (download_lengths) {
+        printDownloadInstructions();
+        if (filename == null) return;
+    }
+
+    if (list_devices) {
+        c.audio_list_devices();
         return;
     }
 
-    const fname = filename.?;
+    const sid_file = filename orelse {
+        printUsage(args[0]);
+        return;
+    };
 
-    // Load ROMs
-    const kernal = try loadRom(allocator, "rom/Kernal.rom");
-    defer allocator.free(kernal);
-    const basic = try loadRom(allocator, "rom/Basic.rom");
-    defer allocator.free(basic);
-    const chargen = try loadRom(allocator, "rom/Char.rom");
-    defer allocator.free(chargen);
+    // Load ROMs (Optional)
+    const kernal_path = try std.fs.path.join(allocator, &.{ rom_base, "Kernal.rom" });
+    defer allocator.free(kernal_path);
+    const basic_path = try std.fs.path.join(allocator, &.{ rom_base, "Basic.rom" });
+    defer allocator.free(basic_path);
+    const chargen_path = try std.fs.path.join(allocator, &.{ rom_base, "Char.rom" });
+    defer allocator.free(chargen_path);
+
+    const kernal = loadRom(allocator, kernal_path) catch null;
+    defer if (kernal) |k| allocator.free(k);
+    const basic = loadRom(allocator, basic_path) catch null;
+    defer if (basic) |b| allocator.free(b);
+    const chargen = loadRom(allocator, chargen_path) catch null;
+    defer if (chargen) |c_gen| allocator.free(c_gen);
+
+    if (kernal == null or basic == null or chargen == null) {
+        std.debug.print("Warning: C64 ROMs missing in '{s}' folder. RSID files may not play.\n", .{rom_base});
+    }
 
     if (extract_file) |outfile| {
         std.debug.print("Extracting to {s} for {d} seconds...\n", .{outfile, duration_sec});
@@ -177,11 +351,15 @@ pub fn main(init: std.process.Init) !void {
         var i: usize = 0;
         while (i < 4) : (i += 1) {
             players[i] = c.sid_new() orelse return error.SidInitFailed;
-            c.sid_set_roms(players[i], kernal.ptr, basic.ptr, chargen.ptr);
+            c.sid_set_roms(players[i], 
+                if (kernal) |k| k.ptr else null, 
+                if (basic) |b| b.ptr else null, 
+                if (chargen) |c_gen| c_gen.ptr else null
+            );
             builders[i] = c.builder_new("ReSIDfp") orelse return error.BuilderInitFailed;
-            tunes[i] = c.tune_new(fname.ptr) orelse return error.TuneLoadFailed;
+            tunes[i] = c.tune_new(sid_file.ptr) orelse return error.TuneLoadFailed;
             if (!c.tune_status(tunes[i])) {
-                std.debug.print("Error: Failed to load tune '{s}'\n", .{fname});
+                std.debug.print("Error: Failed to load tune '{s}'\n", .{sid_file});
                 return;
             }
             _ = c.tune_select_song(tunes[i], c.tune_start_song(tunes[i])); 
@@ -199,6 +377,7 @@ pub fn main(init: std.process.Init) !void {
 
             contexts[i] = PlayerContext{
                 .player = players[i],
+                .tune = tunes[i],
                 .clock_speed = c.tune_get_clock_speed(tunes[i]),
             };
         }
@@ -228,8 +407,6 @@ pub fn main(init: std.process.Init) !void {
             // Interleave
             var f: usize = 0;
             while (f < frames_to_write) : (f += 1) {
-                // mix_bufs contains stereo: L, R, L, R...
-                // we want: v0, v1, v2, v3 for each frame
                 out_buf[f * 4 + 0] = mix_bufs[0][f * 2]; // Player 0 (Voice 0) Left channel
                 out_buf[f * 4 + 1] = mix_bufs[1][f * 2]; // Player 1 (Voice 1) Left channel
                 out_buf[f * 4 + 2] = mix_bufs[2][f * 2]; // Player 2 (Voice 2) Left channel
@@ -247,20 +424,23 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // Normal playback path
     const player = c.sid_new() orelse return error.SidInitFailed;
     defer c.sid_delete(player);
 
-    c.sid_set_roms(player, kernal.ptr, basic.ptr, chargen.ptr);
+    c.sid_set_roms(player, 
+        if (kernal) |k| k.ptr else null, 
+        if (basic) |b| b.ptr else null, 
+        if (chargen) |c_gen| c_gen.ptr else null
+    );
 
     const builder = c.builder_new("ReSIDfp");
     defer c.builder_delete(builder);
 
-    const tune = c.tune_new(fname.ptr) orelse return error.TuneLoadFailed;
+    const tune = c.tune_new(sid_file.ptr) orelse return error.TuneLoadFailed;
     defer c.tune_delete(tune);
 
     if (!c.tune_status(tune)) {
-        std.debug.print("Error: Failed to load tune '{s}'\n", .{fname});
+        std.debug.print("Error: Failed to load tune '{s}'\n", .{sid_file});
         return;
     }
 
@@ -295,28 +475,175 @@ pub fn main(init: std.process.Init) !void {
 
     c.sid_init_mixer(player);
     
+    // Calculate MD5s for HVSC compatibility
+    var sid_data: []u8 = undefined;
+    {
+        const path_z = try allocator.dupeZ(u8, sid_file);
+        defer allocator.free(path_z);
+        const file = c.fopen(path_z.ptr, "rb") orelse return error.FileNotFound;
+        defer _ = c.fclose(file);
+        _ = c.fseek(file, 0, c.SEEK_END);
+        const size = @as(usize, @intCast(c.ftell(file)));
+        _ = c.fseek(file, 0, c.SEEK_SET);
+        sid_data = try allocator.alloc(u8, size);
+        _ = c.fread(sid_data.ptr, 1, size, file);
+    }
+    defer allocator.free(sid_data);
+    
+    var md5_full_buf: [16]u8 = undefined;
+    Md5.hash(sid_data, &md5_full_buf, .{});
+    
+    var md5_headerless_buf: [16]u8 = undefined;
+    if (sid_data.len > 124) {
+        Md5.hash(sid_data[124..], &md5_headerless_buf, .{});
+    } else {
+        @memcpy(&md5_headerless_buf, &md5_full_buf);
+    }
+    
+    var full_str_buf: [32]u8 = undefined;
+    var hl_str_buf: [32]u8 = undefined;
+    
+    for (md5_full_buf, 0..) |b, j| {
+        _ = std.fmt.bufPrint(full_str_buf[j * 2 .. j * 2 + 2], "{x:0>2}", .{b}) catch unreachable;
+    }
+    for (md5_headerless_buf, 0..) |b, j| {
+        _ = std.fmt.bufPrint(hl_str_buf[j * 2 .. j * 2 + 2], "{x:0>2}", .{b}) catch unreachable;
+    }
+
+    const hl_str = &hl_str_buf;
+    const full_str = &full_str_buf;
+
+    // Try headerless first, then full-file
+    var song_lengths = parseSongLengths(allocator, hl_str) catch &.{};
+    var used_md5 = hl_str;
+    if (song_lengths.len == 0) {
+        song_lengths = parseSongLengths(allocator, full_str) catch &.{};
+        used_md5 = full_str;
+    }
+    defer allocator.free(song_lengths);
+
     var context = PlayerContext{ 
         .player = player,
+        .tune = tune,
         .clock_speed = c.tune_get_clock_speed(tune),
+        .current_song = start_song,
+        .total_songs = total_songs,
+        .song_lengths = song_lengths,
     };
 
     const audio = c.audio_init(sid_callback, &context, deviceIndex) orelse return error.AudioInitFailed;
     defer c.audio_deinit(audio);
 
-    std.debug.print("Playing:  {s} ({d} Hz)\n", .{fname, context.clock_speed});
-    std.debug.print("Control:  Press Ctrl+C to stop.\n\n", .{});
+    const clock_type = if (context.clock_speed == 1022727) "NTSC" else "PAL";
+    std.debug.print("System:   {s} ({d} Hz)\n", .{clock_type, context.clock_speed});
+    std.debug.print("MD5:      {s}\n", .{used_md5});
+    std.debug.print("Playing:  {s}\n", .{sid_file});
+    
+    if (song_lengths.len > 0) {
+        std.debug.print("Lengths:  ", .{});
+        for (song_lengths, 0..) |len, idx| {
+            if (idx > 0) std.debug.print(", ", .{});
+            std.debug.print("{d}:{d:0>2}", .{@divTrunc(len, 60), @mod(len, 60)});
+        }
+        std.debug.print("\n", .{});
+    }
+
+    std.debug.print("\nControls: [Space] Play/Pause | [N/P] Next/Prev Song | [+/-] Volume | [Q] Quit\n\n", .{});
+    
     c.audio_start(audio);
     
-    std.debug.print("Initialization complete. Starting playback...\n", .{});
-    
     const start_time = c.time(null);
+    var track_start_time = c.time(null);
+    const hIn = c.GetStdHandle(c.STD_INPUT_HANDLE);
     
-    while (true) {
-        try init.io.sleep(.fromMilliseconds(1000), .awake);
-        const elapsed = c.time(null) - start_time;
+    var running = true;
+    while (running) {
+        // Handle Input
+        var num_events: c.DWORD = 0;
+        if (c.GetNumberOfConsoleInputEvents(hIn, &num_events) != 0 and num_events > 0) {
+            var input_record: c.INPUT_RECORD = undefined;
+            var events_read: c.DWORD = 0;
+            if (c.ReadConsoleInputW(hIn, &input_record, 1, &events_read) != 0) {
+                if (input_record.EventType == c.KEY_EVENT and input_record.Event.KeyEvent.bKeyDown != 0) {
+                    const key = input_record.Event.KeyEvent.wVirtualKeyCode;
+                    switch (key) {
+                        VK_SPACE => {
+                            context.is_paused = !context.is_paused;
+                        },
+                        VK_Q, VK_ESCAPE => {
+                            running = false;
+                        },
+                        VK_ADD, VK_OEM_PLUS => {
+                            context.volume = @min(1.0, context.volume + 0.1);
+                            c.audio_set_volume(audio, context.volume);
+                        },
+                        VK_SUBTRACT, VK_OEM_MINUS => {
+                            context.volume = @max(0.0, context.volume - 0.1);
+                            c.audio_set_volume(audio, context.volume);
+                        },
+                        VK_N => {
+                            switchSong(&context, context.current_song + 1, &track_start_time);
+                        },
+                        VK_P => {
+                            switchSong(&context, context.current_song - 1, &track_start_time);
+                        },
+                        else => {},
+                    }
+                }
+            }
+        }
+
+        const now = c.time(null);
+        const elapsed = now - start_time;
+        const track_elapsed = now - track_start_time;
+
+        // Auto-advance logic
+        var should_advance = false;
+        
+        // 1. Check song length if available
+        if (context.current_song <= context.song_lengths.len) {
+            const len = context.song_lengths[context.current_song - 1];
+            if (len > 0 and track_elapsed >= len) {
+                should_advance = true;
+                std.debug.print("\rTrack finished (length reached).             \n", .{});
+            }
+        }
+        
+        // 2. Check silence (6 seconds)
+        const silent_secs = @as(f32, @floatFromInt(context.silent_frames)) / 44100.0;
+        if (silent_secs > 6.0) {
+            should_advance = true;
+            std.debug.print("\rTrack finished (silence detected).             \n", .{});
+        }
+
+        if (should_advance) {
+            if (context.current_song < context.total_songs) {
+                switchSong(&context, context.current_song + 1, &track_start_time);
+            } else {
+                running = false;
+            }
+        }
+
         const mins = @as(u32, @intCast(@max(0, @divFloor(elapsed, 60))));
         const secs = @as(u32, @intCast(@max(0, @mod(elapsed, 60))));
         
-        std.debug.print("\rTime: {d:0>2}:{d:0>2} | Samples: {d}   ", .{mins, secs, context.sample_count});
+        const track_mins = @as(u32, @intCast(@max(0, @divFloor(track_elapsed, 60))));
+        const track_secs = @as(u32, @intCast(@max(0, @mod(track_elapsed, 60))));
+        
+        const status = if (context.is_paused) "PAUSED " else "PLAYING";
+        std.debug.print("\r[{s}] Song: {d}/{d} | Vol: {d: >3}% | Track: {d:0>2}:{d:0>2} | Time: {d:0>2}:{d:0>2} | Samples: {d}       ", .{
+            status, 
+            context.current_song, 
+            context.total_songs,
+            @as(u32, @intFromFloat(context.volume * 100)),
+            track_mins,
+            track_secs,
+            mins, 
+            secs, 
+            context.sample_count
+        });
+        
+        c.Sleep(50);
     }
+    std.debug.print("\nStopped.\n", .{});
 }
