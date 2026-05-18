@@ -115,12 +115,8 @@ def main():
                 except Exception as e:
                     print(f"Warning: Could not dim background image: {e}")
             
-            # If we are doing the FX pass, we keep the background empty in Corrscope (rendering on black)
-            # and compost it perfectly in FFmpeg later so the background image remains sharp and un-blurred!
-            if args.fx == "none":
-                config["render"]["bg_image"] = bg_path
-            else:
-                config["render"]["bg_image"] = ""
+            # Pass the background image directly to Corrscope
+            config["render"]["bg_image"] = bg_path
     
     with open(yaml_path, "w") as f:
         yaml.dump(config, f)
@@ -164,29 +160,9 @@ def main():
         print(f"Applying lightning-fast GPU accelerated CRT/Glow FX to {args.out}...")
         fx_out = args.out.replace(".mp4", "_fx.mp4")
         
-        # If a background image is provided, we compost it under the waveforms in FFmpeg.
-        # We use a colorkey filter to make the waveforms' black background transparent,
-        # and then overlay the glow and sharp waveforms over the background.
-        # This keeps the background image 100% sharp and color-perfect, without any washing out!
-        if args.bg:
-            filtergraph = (
-                "[0:v]colorkey=0x000000:0.1:0.1[waveforms_trans];"
-                "[waveforms_trans]split[base][glow_src];"
-                "[glow_src]scale=iw/4:ih/4,boxblur=5,scale=iw*4:ih*4[glow];"
-                "[1:v]scale=1920:1080[bg];"
-                "[bg][glow]overlay=format=auto[temp];"
-                "[temp][base]overlay=format=auto[composed];"
-                "[composed]drawgrid=w=10000:h=4:t=1:c=black@0.3[out]"
-            )
-            extra_inputs = ["-i", bg_path]
-        else:
-            filtergraph = (
-                "[0:v]split[base][glow_src];"
-                "[glow_src]scale=iw/4:ih/4,boxblur=5,scale=iw*4:ih*4[glow_blurred];"
-                "[base][glow_blurred]blend=all_mode=screen[glowing];"
-                "[glowing]drawgrid=w=10000:h=4:t=1:c=black@0.3[out]"
-            )
-            extra_inputs = []
+        # Simplify the FX graph to just the CRT scanline effect
+        filtergraph = "[0:v]drawgrid=w=10000:h=4:t=1:c=black@0.35[out]"
+        extra_inputs = []
         
         ffmpeg_bin = r"C:\Users\topguy\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.1-full_build\bin\ffmpeg.exe"
         
