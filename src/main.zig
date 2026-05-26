@@ -212,21 +212,69 @@ fn loadRom(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return buffer;
 }
 
-const WavHeader = extern struct {
-    riff_id: [4]u8 = "RIFF".*,
-    file_size: u32 = 0,
-    wave_id: [4]u8 = "WAVE".*,
-    fmt_id: [4]u8 = "fmt ".*,
-    fmt_size: u32 = 16,
-    audio_format: u16 = 1,
-    num_channels: u16 = 4,
-    sample_rate: u32 = 44100,
-    byte_rate: u32 = 44100 * 4 * 2,
-    block_align: u16 = 4 * 2,
-    bits_per_sample: u16 = 16,
-    data_id: [4]u8 = "data".*,
-    data_size: u32 = 0,
-};
+fn writeWavHeaders(file: *c.FILE, data_bytes: u32, title_str: []const u8, author_str: []const u8, released_str: []const u8) void {
+    const calcRiffTagSize = struct {
+        fn calc(val: []const u8) u32 {
+            if (val.len == 0) return 0;
+            const size_with_null = @as(u32, @intCast(val.len + 1));
+            var total: u32 = 4 + 4 + size_with_null;
+            if (size_with_null % 2 != 0) total += 1;
+            return total;
+        }
+    }.calc;
+    
+    const inam_sz = calcRiffTagSize(title_str);
+    const iart_sz = calcRiffTagSize(author_str);
+    const icrd_sz = calcRiffTagSize(released_str);
+    
+    var has_tags = false;
+    var list_size: u32 = 4; // "INFO"
+    if (inam_sz > 0 or iart_sz > 0 or icrd_sz > 0) {
+        has_tags = true;
+        list_size += inam_sz + iart_sz + icrd_sz;
+    }
+    
+    var final_file_size: u32 = 4 + 24 + 8 + data_bytes;
+    if (has_tags) final_file_size += (8 + list_size);
+    
+    _ = c.fseek(file, 0, c.SEEK_SET);
+    
+    // RIFF header
+    _ = c.fwrite("RIFF", 1, 4, file);
+    _ = c.fwrite(&final_file_size, 4, 1, file);
+    _ = c.fwrite("WAVE", 1, 4, file);
+    
+    // fmt chunk
+    _ = c.fwrite("fmt ", 1, 4, file);
+    var fmt_sz: u32 = 16;
+    _ = c.fwrite(&fmt_sz, 4, 1, file);
+    var audio_fmt: u16 = 1;
+    _ = c.fwrite(&audio_fmt, 2, 1, file);
+    var num_ch: u16 = 4;
+    _ = c.fwrite(&num_ch, 2, 1, file);
+    var s_rate: u32 = 44100;
+    _ = c.fwrite(&s_rate, 4, 1, file);
+    var b_rate: u32 = 44100 * 4 * 2;
+    _ = c.fwrite(&b_rate, 4, 1, file);
+    var b_align: u16 = 4 * 2;
+    _ = c.fwrite(&b_align, 2, 1, file);
+    var bps: u16 = 16;
+    _ = c.fwrite(&bps, 2, 1, file);
+    
+    // LIST chunk
+    if (has_tags) {
+        _ = c.fwrite("LIST", 1, 4, file);
+        _ = c.fwrite(&list_size, 4, 1, file);
+        _ = c.fwrite("INFO", 1, 4, file);
+        _ = writeRiffTag(file, "INAM", title_str);
+        _ = writeRiffTag(file, "IART", author_str);
+        _ = writeRiffTag(file, "ICRD", released_str);
+    }
+    
+    // data chunk
+    _ = c.fwrite("data", 1, 4, file);
+    _ = c.fwrite(&data_bytes, 4, 1, file);
+}
 
 fn writeRiffTag(file: *c.FILE, tag: []const u8, value: []const u8) u32 {
     if (value.len == 0) return 0;
@@ -268,7 +316,8 @@ pub fn main(init: std.process.Init) !void {
     var deviceIndex: i32 = -1;
     var extract_file: ?[:0]const u8 = null;
     var duration_sec: ?u32 = null;
-    var track_arg: ?u32 = null;
+    var track_list = std.ArrayList(u32).empty;
+    defer track_list.deinit(allocator);
     var rom_base: []const u8 = "rom";
     var list_devices = false;
     var download_lengths = false;
@@ -298,7 +347,14 @@ pub fn main(init: std.process.Init) !void {
             if (arg_i < args.len) extract_file = @ptrCast(args[arg_i]);
         } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--track")) {
             arg_i += 1;
-            if (arg_i < args.len) track_arg = std.fmt.parseInt(u32, args[arg_i], 10) catch null;
+            if (arg_i < args.len) {
+                var it = std.mem.splitScalar(u8, args[arg_i], ',');
+                while (it.next()) |num_str| {
+                    if (std.fmt.parseInt(u32, num_str, 10)) |num| {
+                        track_list.append(allocator, num) catch {};
+                    } else |_| {}
+                }
+            }
         } else if (std.mem.eql(u8, arg, "--duration")) {
             arg_i += 1;
             if (arg_i < args.len) duration_sec = std.fmt.parseInt(u32, args[arg_i], 10) catch null;
@@ -388,9 +444,13 @@ pub fn main(init: std.process.Init) !void {
 
     if (extract_file) |outfile| {
         const tmp_tune = c.tune_new(sid_file.ptr) orelse return error.TuneLoadFailed;
-        const start_song = if (track_arg) |t| t else c.tune_start_song(tmp_tune);
+        const total_songs_in_file = c.tune_songs(tmp_tune);
         
-        // Save metadata strings
+        if (track_list.items.len == 0) {
+            track_list.append(allocator, c.tune_start_song(tmp_tune)) catch {};
+        }
+        
+        // Save metadata strings (we just use the SID file's global metadata)
         const title = c.tune_info_string(tmp_tune, 0);
         const author = c.tune_info_string(tmp_tune, 1);
         const released = c.tune_info_string(tmp_tune, 2);
@@ -405,141 +465,145 @@ pub fn main(init: std.process.Init) !void {
 
         c.tune_delete(tmp_tune);
         
-        if (duration_sec == null and start_song > 0 and start_song <= song_lengths.len) {
-            const length = song_lengths[start_song - 1];
-            if (length > 0) duration_sec = length;
-        }
+        var valid_tracks = std.ArrayList(u32).empty;
+        defer valid_tracks.deinit(allocator);
+        var valid_durations = std.ArrayList(u32).empty;
+        defer valid_durations.deinit(allocator);
+        
+        var total_exact_duration: u32 = 0;
 
-        if (duration_sec == null) {
-            std.debug.print("Error: No duration given and track length not found in database.\nUse --duration <secs> to specify extraction length.\n", .{});
+        for (track_list.items) |t| {
+            if (t < 1 or t > total_songs_in_file) {
+                std.debug.print("Warning: Skipping invalid track {d}\n", .{t});
+                continue;
+            }
+            
+            var track_dur: ?u32 = null;
+            if (duration_sec) |ds| {
+                track_dur = ds;
+            } else if (t <= song_lengths.len) {
+                const length = song_lengths[t - 1];
+                if (length > 0) track_dur = length;
+            }
+            
+            if (track_dur) |dur| {
+                total_exact_duration += dur;
+                valid_tracks.append(allocator, t) catch {};
+                valid_durations.append(allocator, dur) catch {};
+            } else {
+                std.debug.print("Warning: Skipping track {d} (unknown length, no --duration fallback)\n", .{t});
+            }
+        }
+        
+        if (valid_tracks.items.len == 0) {
+            std.debug.print("Error: No valid tracks to extract.\n", .{});
             return;
         }
 
-        const exact_duration = duration_sec.?;
-        std.debug.print("Extracting track {d} to {s} (max {d} seconds)...\n", .{start_song, outfile, exact_duration});
+        std.debug.print("Extracting {d} tracks into {s} (Total max {d} seconds)...\n", .{valid_tracks.items.len, outfile, total_exact_duration});
         
         const file = c.fopen(outfile.ptr, "wb") orelse return error.FileCreateFailed;
         defer _ = c.fclose(file);
 
-        const num_channels: u32 = 4;
         const sample_rate: u32 = 44100;
-        const total_samples: usize = @as(usize, exact_duration) * sample_rate;
-        const total_frames: usize = total_samples;
         
-        var header = WavHeader{
-            .num_channels = @intCast(num_channels),
-            .sample_rate = sample_rate,
-            .byte_rate = sample_rate * num_channels * 2,
-            .block_align = @intCast(num_channels * 2),
-            .data_size = @intCast(total_frames * num_channels * 2),
-            .file_size = @intCast(36 + total_frames * num_channels * 2),
-        };
+        // Write initial dummy headers to reserve space
+        // We calculate max possible data size up front
+        const max_data_bytes = @as(u32, @intCast(@as(usize, total_exact_duration) * sample_rate * 4 * 2));
+        writeWavHeaders(file, max_data_bytes, title_str, author_str, released_str);
+
+        var total_frames_written: usize = 0;
         
-        _ = c.fwrite(&header, 1, @sizeOf(WavHeader), file);
-
-        var players: [4]*c.sidplayfp_t = undefined;
-        var builders: [4]*c.SIDLiteBuilder_c = undefined;
-        var tunes: [4]*c.SidTune_c = undefined;
-        var contexts: [4]PlayerContext = undefined;
-
-        var i: usize = 0;
-        while (i < 4) : (i += 1) {
-            players[i] = c.sid_new() orelse return error.SidInitFailed;
-            c.sid_set_roms(players[i], 
-                if (kernal) |k| k.ptr else null, 
-                if (basic) |b| b.ptr else null, 
-                if (chargen) |c_gen| c_gen.ptr else null
-            );
-            builders[i] = c.builder_new("ReSIDfp") orelse return error.BuilderInitFailed;
-            tunes[i] = c.tune_new(sid_file.ptr) orelse return error.TuneLoadFailed;
-            _ = c.tune_select_song(tunes[i], start_song); 
-            if (!c.sid_config(players[i], builders[i], sample_rate)) return error.ConfigFailed;
-            if (!c.sid_load(players[i], tunes[i])) return error.LoadFailed;
-            c.sid_init_mixer(players[i]);
-
-            var v: usize = 0;
-            while (v < 4) : (v += 1) {
-                c.sid_mute(players[i], 0, @intCast(v), v != i);
-            }
-
-            contexts[i] = PlayerContext{
-                .player = players[i],
-                .tune = tunes[i],
-                .clock_speed = c.tune_get_clock_speed(tunes[i]),
-            };
-        }
-
-        defer {
-            for (players) |p| c.sid_delete(p);
-            for (builders) |b| c.builder_delete(b);
-            for (tunes) |t| c.tune_delete(t);
-        }
-
-        var frames_written: usize = 0;
-        const chunk_size = 4096;
-        
-        var mix_bufs: [4][chunk_size * 2]i16 = undefined;
-        var out_buf: [chunk_size * 4]i16 = undefined;
-
-        while (frames_written < total_frames) {
-            const frames_to_write: usize = @min(chunk_size, total_frames - frames_written);
+        for (valid_tracks.items, 0..) |t, i| {
+            const track_dur = valid_durations.items[i];
+            const track_frames = @as(usize, track_dur) * sample_rate;
             
-            for (&contexts, 0..) |*ctx, p_idx| {
-                @memset(&mix_bufs[p_idx], 0);
-                sid_callback(@ptrCast(&mix_bufs[p_idx]), @intCast(frames_to_write), ctx);
+            std.debug.print("\n--- Extracting Track {d} (max {d} secs) ---\n", .{t, track_dur});
+
+            var players: [4]*c.sidplayfp_t = undefined;
+            var builders: [4]*c.SIDLiteBuilder_c = undefined;
+            var tunes: [4]*c.SidTune_c = undefined;
+            var contexts: [4]PlayerContext = undefined;
+
+            var j: usize = 0;
+            while (j < 4) : (j += 1) {
+                players[j] = c.sid_new() orelse return error.SidInitFailed;
+                c.sid_set_roms(players[j], 
+                    if (kernal) |k| k.ptr else null, 
+                    if (basic) |b| b.ptr else null, 
+                    if (chargen) |c_gen| c_gen.ptr else null
+                );
+                builders[j] = c.builder_new("ReSIDfp") orelse return error.BuilderInitFailed;
+                tunes[j] = c.tune_new(sid_file.ptr) orelse return error.TuneLoadFailed;
+                _ = c.tune_select_song(tunes[j], t); 
+                if (!c.sid_config(players[j], builders[j], sample_rate)) return error.ConfigFailed;
+                if (!c.sid_load(players[j], tunes[j])) return error.LoadFailed;
+                c.sid_init_mixer(players[j]);
+
+                var v: usize = 0;
+                while (v < 4) : (v += 1) {
+                    c.sid_mute(players[j], 0, @intCast(v), v != j);
+                }
+
+                contexts[j] = PlayerContext{
+                    .player = players[j],
+                    .tune = tunes[j],
+                    .clock_speed = c.tune_get_clock_speed(tunes[j]),
+                };
             }
 
-            var f: usize = 0;
-            while (f < frames_to_write) : (f += 1) {
-                out_buf[f * 4 + 0] = mix_bufs[0][f * 2];
-                out_buf[f * 4 + 1] = mix_bufs[1][f * 2];
-                out_buf[f * 4 + 2] = mix_bufs[2][f * 2];
-                out_buf[f * 4 + 3] = mix_bufs[3][f * 2];
-            }
-
-            _ = c.fwrite(out_buf[0..(frames_to_write * 4)].ptr, 2, frames_to_write * 4, file);
-            frames_written += frames_to_write;
+            var frames_written: usize = 0;
+            const chunk_size = 4096;
             
-            var all_silent = true;
-            for (&contexts) |*ctx| {
-                if (ctx.silent_frames < 44100 * 5) {
-                    all_silent = false;
+            var mix_bufs: [4][chunk_size * 2]i16 = undefined;
+            var out_buf: [chunk_size * 4]i16 = undefined;
+
+            while (frames_written < track_frames) {
+                const frames_to_write: usize = @min(chunk_size, track_frames - frames_written);
+                
+                for (&contexts, 0..) |*ctx, p_idx| {
+                    @memset(&mix_bufs[p_idx], 0);
+                    sid_callback(@ptrCast(&mix_bufs[p_idx]), @intCast(frames_to_write), ctx);
+                }
+
+                var f: usize = 0;
+                while (f < frames_to_write) : (f += 1) {
+                    out_buf[f * 4 + 0] = mix_bufs[0][f * 2];
+                    out_buf[f * 4 + 1] = mix_bufs[1][f * 2];
+                    out_buf[f * 4 + 2] = mix_bufs[2][f * 2];
+                    out_buf[f * 4 + 3] = mix_bufs[3][f * 2];
+                }
+
+                _ = c.fwrite(out_buf[0..(frames_to_write * 4)].ptr, 2, frames_to_write * 4, file);
+                frames_written += frames_to_write;
+                total_frames_written += frames_to_write;
+                
+                var all_silent = true;
+                for (&contexts) |*ctx| {
+                    if (ctx.silent_frames < 44100 * 5) {
+                        all_silent = false;
+                        break;
+                    }
+                }
+                if (all_silent) {
+                    std.debug.print("\nTrack {d} finished early (5 seconds of silence detected).\n", .{t});
                     break;
                 }
-            }
-            if (all_silent) {
-                std.debug.print("\nExtraction stopped early (5 seconds of silence detected).\n", .{});
-                break;
+                
+                if (frames_written % (44100 * 2) < chunk_size) {
+                    std.debug.print("\rExtracted {d}/{d} seconds...", .{frames_written / 44100, track_dur});
+                }
             }
             
-            if (frames_written % (44100 * 2) < chunk_size) {
-                std.debug.print("\rExtracted {d}/{d} seconds...", .{frames_written / 44100, exact_duration});
-            }
+            // Clean up players for this track
+            for (players) |p| c.sid_delete(p);
+            for (builders) |b| c.builder_delete(b);
+            for (tunes) |tu| c.tune_delete(tu);
         }
         
-        var list_size: u32 = 4;
-        var has_tags = false;
-        if (title_str.len > 0) { list_size += @as(u32, @intCast(8 + title_str.len + 1 + (if ((title_str.len + 1) % 2 != 0) @as(u32, 1) else 0))); has_tags = true; }
-        if (author_str.len > 0) { list_size += @as(u32, @intCast(8 + author_str.len + 1 + (if ((author_str.len + 1) % 2 != 0) @as(u32, 1) else 0))); has_tags = true; }
-        if (released_str.len > 0) { list_size += @as(u32, @intCast(8 + released_str.len + 1 + (if ((released_str.len + 1) % 2 != 0) @as(u32, 1) else 0))); has_tags = true; }
-        
-        if (has_tags) {
-            _ = c.fwrite("LIST", 1, 4, file);
-            _ = c.fwrite(&list_size, 4, 1, file);
-            _ = c.fwrite("INFO", 1, 4, file);
-            _ = writeRiffTag(file, "INAM", title_str);
-            _ = writeRiffTag(file, "IART", author_str);
-            _ = writeRiffTag(file, "ICRD", released_str);
-        }
-        
-        const final_data_size = @as(u32, @intCast(frames_written * num_channels * 2));
-        const final_file_size = 36 + final_data_size + if (has_tags) (8 + list_size) else 0;
-        
-        header.data_size = final_data_size;
-        header.file_size = final_file_size;
-        
-        _ = c.fseek(file, 0, c.SEEK_SET);
-        _ = c.fwrite(&header, 1, @sizeOf(WavHeader), file);
+        // Write the final accurate headers based on how many frames were actually written
+        const final_data_bytes = @as(u32, @intCast(total_frames_written * 4 * 2));
+        writeWavHeaders(file, final_data_bytes, title_str, author_str, released_str);
         
         std.debug.print("\nExtraction complete!\n", .{});
         return;

@@ -74,6 +74,9 @@ audio_engine_t* audio_init(audio_callback_t callback, void* pUserData, int devic
     deviceConfig.sampleRate        = 44100;
     deviceConfig.dataCallback      = data_callback;
     deviceConfig.pUserData         = engine;
+    
+    // Increase buffer size to 50ms to prevent buffer underruns (noise)
+    deviceConfig.periodSizeInMilliseconds = 50;
 
     if (ma_device_init(&engine->context, &deviceConfig, &engine->device) != MA_SUCCESS) {
         ma_context_uninit(&engine->context);

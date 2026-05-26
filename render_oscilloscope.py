@@ -14,7 +14,7 @@ def main():
     parser.add_argument("input_wav", help="Input multi-channel wav file")
     parser.add_argument("--channels", type=int, default=4, help="Number of channels to render (default: 4)")
     parser.add_argument("--amp", type=float, default=1.0, help="Amplification factor for waveforms (default: 1.0)")
-    parser.add_argument("--out", type=str, default="output.mp4", help="Output MP4 filename (default: output.mp4)")
+    parser.add_argument("--out", type=str, default=None, help="Output MP4 filename (default: alongside input file)")
     parser.add_argument("--thickness", type=float, default=1.5, help="Line thickness for waveforms (default: 1.5)")
     parser.add_argument("--bg", type=str, default="", help="Path to a background image file (e.g. bg.png)")
     parser.add_argument("--bg-dim", type=float, default=1.0, help="Brightness multiplier for the background image (e.g. 0.5 for 50%% brightness). Default is 1.0")
@@ -23,7 +23,13 @@ def main():
     args = parser.parse_args()
     
     input_wav = args.input_wav
-    output_dir = "stems"
+    input_dir = os.path.dirname(os.path.abspath(input_wav))
+    
+    if args.out is None:
+        base_name = os.path.splitext(os.path.basename(input_wav))[0]
+        args.out = os.path.join(input_dir, f"{base_name}.mp4")
+        
+    output_dir = os.path.join(input_dir, "stems")
     
     os.makedirs(output_dir, exist_ok=True)
     
@@ -62,16 +68,19 @@ def main():
     wavfile.write(master_mix_path, sample_rate, mix)
     
     # Generate default corrscope yaml
-    yaml_path = "project.yaml"
+    yaml_path = os.path.join(input_dir, "project.yaml")
     cmd = ["python", "-m", "corrscope", *stem_files, "-a", master_mix_path, "-w"]
     print(f"Generating default config: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
     
-    # We need the generated yaml name, it defaults to the master_audio filename with .yaml
+    # corrscope writes the YAML based on the master audio basename to the CWD
     default_yaml = "master_mix.yaml"
     if not os.path.exists(default_yaml):
-        print(f"Cannot find generated yaml {default_yaml}")
-        sys.exit(1)
+        # fallback in case it generated it alongside the audio
+        default_yaml = os.path.splitext(master_mix_path)[0] + ".yaml"
+        if not os.path.exists(default_yaml):
+            print(f"Cannot find generated yaml {default_yaml}")
+            sys.exit(1)
         
     # Modify yaml
     print(f"Modifying {default_yaml}...")
@@ -224,6 +233,51 @@ def main():
             sys.exit(1)
             
         print(f"Final FX video saved as {fx_out}!")
+        
+    # Generate DaVinci Resolve FCPXML
+    print(f"Generating FCPXML for DaVinci Resolve...")
+    final_vid = fx_out if args.fx == "crt" else args.out
+    fcpxml_path = os.path.splitext(final_vid)[0] + ".fcpxml"
+    
+    try:
+        from urllib.request import pathname2url
+        
+        # Format as file:///C:/path/to/file.mp4
+        vid_url = "file:" + pathname2url(os.path.abspath(final_vid))
+        wav_url = "file:" + pathname2url(os.path.abspath(input_wav))
+        
+        fps = 60
+        total_frames = int(total_seconds * fps)
+        
+        fcpxml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.5">
+    <resources>
+        <format id="r1" name="FFVideoFormat1080p60" frameDuration="1/60s" width="1920" height="1080"/>
+        <asset id="r2" name="VideoAsset" src="{vid_url}" start="0s" duration="{total_frames}/60s" hasVideo="1" hasAudio="1"/>
+        <asset id="r3" name="AudioAsset" src="{wav_url}" start="0s" duration="{total_frames}/60s" hasVideo="0" hasAudio="1"/>
+    </resources>
+    <library>
+        <event name="Oscilloscope Event">
+            <project name="Oscilloscope Timeline">
+                <sequence format="r1" duration="{total_frames}/60s" tcStart="0s" tcFormat="NDF">
+                    <spine>
+                        <video name="Video" ref="r2" offset="0s" duration="{total_frames}/60s" start="0s">
+                            <audio name="MultiChannel Audio" ref="r3" offset="0s" duration="{total_frames}/60s" start="0s"/>
+                        </video>
+                    </spine>
+                </sequence>
+            </project>
+        </event>
+    </library>
+</fcpxml>
+"""
+        with open(fcpxml_path, "w", encoding="utf-8") as f:
+            f.write(fcpxml_content)
+        print(f"Done! You can import {fcpxml_path} in DaVinci Resolve via File -> Import -> Timeline.")
+    except Exception as e:
+        print(f"Warning: Failed to generate FCPXML: {e}")
     
 if __name__ == "__main__":
     main()
+

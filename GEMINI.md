@@ -21,9 +21,10 @@ The executable is generated at `zig-out/bin/zidplayer.exe`.
 2. **Advanced WAV Extractor**: `--extract <outfile.wav>`
    - Automatically checks `Songlengths.md5` for precise durations.
    - Trims dead air automatically (5-second silence detector).
-   - Allows specific track extractions with `--track <num>`.
-   - Injects RIFF `INFO` metadata directly into the WAV.
+   - Allows multi-track extractions concatenated into one file with `--track <num>,<num>`.
+   - Injects correctly formatted RIFF `LIST INFO` metadata for Windows Explorer compatibility.
 3. **HVSC Metadata Parser**: Hashes incoming `.sid` files and matches lengths against the HVSC database.
+4. **Stable Audio Engine**: 50ms miniaudio buffer eliminates underrun noise during high CPU emulation loads.
 
 ## How to Initialize as a Git Repo
 If you want to move this project to a clean Git repository with submodules:

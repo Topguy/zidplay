@@ -1,6 +1,7 @@
 # Zig
 .zig-cache/
 zig-out/
+__pycache__
 
 # C++ Build Artifacts
 *.o
@@ -16,6 +17,7 @@ temp_zig/
 # Local ROMs
 rom/
 stems/
+songs/
 
 # Test SID files
 *.sid
