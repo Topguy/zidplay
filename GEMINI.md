@@ -1,46 +1,23 @@
-# Project: ZidPlayer (Zig + libsidplayfp)
+# Internal Notes for Antigravity
 
-## Current Status
-We have successfully implemented a **native Windows build** using Zig's internal C++ toolchain (Zig 0.16.0). We are no longer using precompiled `.a` libraries from WSL2, which has resolved all ABI and linking issues.
+This file is a scratchpad/knowledge-base intended to keep track of project idiosyncrasies, system quirks, and language-specific rules.
 
-### Files & Structure:
-- `src/main.zig`: Entry point for the player (includes TUI and Extraction pipeline).
-- `src/sid_wrapper.cpp / .h`: C wrapper for the `libsidplayfp` C++ API.
-- `build.zig`: Modern Zig build script that compiles the entire `libsidplayfp` source tree and the player.
-- `libsidplayfp/`: Source code for the library, including required `.bin` blobs (psiddrv, sidplayer1/2).
-- `render_oscilloscope.py`: Python pipeline script to render the extracted `.wav` files into multi-layer oscilloscope `.mp4` videos using `corrscope` and FFmpeg.
+## Zig Notes (0.16.0 specifics)
+- **`std.ArrayList` changes**: In Zig 0.16.0, `std.ArrayList(T)` acts as an unmanaged list (previously `std.ArrayListUnmanaged`). 
+  - Do NOT initialize with `std.ArrayList(T).init(allocator)`. This will fail with `struct 'array_list.Aligned(u32,null)' has no member named 'init'`.
+  - Instead, initialize with `std.ArrayList(T).empty`.
+  - When appending, explicitly pass the allocator: `list.append(allocator, item)`.
+  - When freeing memory, explicitly pass the allocator: `list.deinit(allocator)`.
 
-### Build Command:
-```powershell
-zig build
-```
-The executable is generated at `zig-out/bin/zidplayer.exe`.
+## System & Environment Notes
+- **OS**: Windows
+- **Shell**: PowerShell
+- **Command Separators**: Do NOT use `&&` to chain commands in Windows PowerShell. Use `;` instead. For example: `git add . ; git commit -F msg.txt`.
+- **Git Commits**: The user strictly requires using a temporary text file for git commits. 
+  - Standard format: `git commit -F commit_msg.txt ; Remove-Item commit_msg.txt`.
 
-### Key Features Implemented:
-1. **Interactive TUI**: Space to pause, N/P to skip tracks, +/- for volume.
-2. **Advanced WAV Extractor**: `--extract <outfile.wav>`
-   - Automatically checks `Songlengths.md5` for precise durations.
-   - Trims dead air automatically (5-second silence detector).
-   - Allows multi-track extractions concatenated into one file with `--track <num>,<num>`.
-   - Injects correctly formatted RIFF `LIST INFO` metadata for Windows Explorer compatibility.
-3. **HVSC Metadata Parser**: Hashes incoming `.sid` files and matches lengths against the HVSC database.
-4. **Stable Audio Engine**: 50ms miniaudio buffer eliminates underrun noise during high CPU emulation loads.
+## Build System
+- `zig build` is used for compilation.
+- The project wraps `libsidplayfp` and `libresidfp`.
 
-## How to Initialize as a Git Repo
-If you want to move this project to a clean Git repository with submodules:
-
-1. **Delete current folders**: `rm -Recurse libsidplayfp, libresidfp`
-2. **Add Submodules**:
-   ```bash
-   git submodule add https://github.com/libsidplayfp/libsidplayfp.git libsidplayfp
-   git submodule add https://github.com/libsidplayfp/libresidfp.git libresidfp
-   ```
-3. **Lock to working versions**:
-   - `libsidplayfp`: `616d2e7e2da618ef29f2a4044a9a4d58e790bf20`
-   - `libresidfp`: `24f204e684e5cecf909fc77b72835d489ad85b4a`
-4. **Apply Patches**: `zig run apply_patches.zig`
-5. **Build**: `zig build`
-
-## Git Guidelines
-- The user uses a local forgejo repository at `http://192.168.10.98:3333/topguy/zidplay.git`.
-- Always use `git commit -F commit_msg.txt; Remove-Item commit_msg.txt` for commits.
+*Do not place user-facing documentation here. Use `README.md` for that.*

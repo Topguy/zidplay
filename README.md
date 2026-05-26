@@ -7,7 +7,7 @@ A high-fidelity Commodore 64 SID music player and stem extractor built with **Zi
 - **High Fidelity**: Cycle-accurate SID emulation using `libresidfp`.
 - **Accurate Timing**: Correct PAL/NTSC speed detection.
 - **Interactive TUI**: Live controls for Play/Pause, Next/Prev Song, and Volume.
-- **Advanced Extractor**: Rip individual SID subsongs into perfectly timed, metadata-tagged, 4-channel WAV stems with automatic 5-second silence detection and trimming.
+- **Advanced Extractor**: Rip individual SID subsongs, or multiple subsongs sequentially, into perfectly timed, metadata-tagged, 4-channel WAV stems with automatic 5-second silence detection and trimming.
 - **MD5 HVSC Support**: Automatically parses `Songlengths.md5` to display accurate track durations and automate track switching.
 
 ## Prerequisites
@@ -52,7 +52,7 @@ Run the player from the terminal by providing a `.sid` file:
   -d, --device <id>    Select audio device by ID (default: system default)
   -r, --roms <path>    Path to C64 ROMs directory (default: ./rom)
   --download-lengths   Show instructions to download Songlengths.md5 
-  -t, --track <num>    Extract a specific subsong track (default: starting song)
+  -t, --track <list>   Extract a specific subsong track or comma-separated list (e.g. 1,3,4)
   --extract <outfile>  Extract to multi-channel wav
   --duration <secs>    Extraction duration (overrides MD5 database)
 ```
@@ -72,16 +72,18 @@ This repository also contains `render_oscilloscope.py`, a powerful Python utilit
 - **Custom Retro Colors**: Automatically applies bright, neon retro colors to the separate audio channels.
 - **Hardware-Accelerated FX**: Includes a `--fx crt` flag that adds retro CRT scanlines utilizing lightning-fast GPU-accelerated FFmpeg encoders (NVENC/AMF) with CPU fallbacks.
 - **Backgrounds**: Supports placing a custom image behind the waveforms using the `--bg` flag (and dimming it with `--bg-dim`).
+- **DaVinci Resolve Integration**: Generates an `.fcpxml` timeline for seamless import into DaVinci Resolve or Final Cut Pro, with perfectly aligned video, stems, and background images.
 
-### Example Render Pipeline
-1. **Extract the audio**:
+### Example Workflow
+1. **Extract multiple tracks as one continuous WAV**:
 ```bash
-.\zig-out\bin\zidplayer.exe Sanxion.sid --extract sanxion.wav -t 1
+.\zig-out\bin\zidplayer.exe Sanxion.sid --extract sanxion.wav --track 1,2
 ```
 2. **Render the video** (with CRT effects and a background):
 ```bash
 python render_oscilloscope.py sanxion.wav --out sanxion.mp4 --bg sanxion_bg.jpg --bg-dim 0.4 --fx crt
 ```
+3. **Import to Video Editor**: Import the resulting `sanxion.fcpxml` into DaVinci Resolve to instantly recreate the timeline.
 
 ## Technical Details
 - **Language**: Zig (main logic and audio callback).
